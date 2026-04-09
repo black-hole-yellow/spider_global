@@ -1,144 +1,75 @@
-import pandas as pd
-import numpy as np
 import time
-import logging
-from collections import deque
-from catboost import CatBoostClassifier
+import pandas as pd
+from agents.global_agent import GlobalAlphaAgent
+from agents.chief_agent import ChiefRiskOfficer
 
-# Импорты наших слоев (согласно Архитектурному Блюпринту)
-from shared.features import htf, ml_features, sessions
-from strategies.library.generic_strategy import InstitutionalSMCStrategy
-from trading.portfolio.portfolio_manager import PortfolioManager
+def run_paper_trader():
+    print("🚀 Запуск Live Trader (Режим Paper Trading)...")
+    
+    # 1. Инициализация Агентов
+    try:
+        alpha_agent = GlobalAlphaAgent()
+        # Chief Agent разрешает сделки только с уверенностью > 3.0% и риском 2%
+        chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
+    except Exception as e:
+        print(f"❌ Ошибка инициализации: {e}")
+        return
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    # 2. Подключение к потоку данных
+    # В реальном времени здесь будет API запрос к Oanda/Binance. 
+    # Сейчас берем последний срез нашего идеального датасета.
+    dataset_path = "data/processed/full_merged_dataset.parquet"
+    print(f"\n📊 Подключение к потоку данных: {dataset_path}")
+    
+    try:
+        df = pd.read_parquet(dataset_path)
+    except FileNotFoundError:
+        print("❌ Датасет не найден. Сначала выполни сборку данных.")
+        return
+    
+    # Имитируем "Текущий момент" - берем последние 32 свечи
+    current_market_data = df.iloc[-32:].copy()
+    current_price = current_market_data['close'].iloc[-1]
+    current_time = current_market_data.index[-1]
+    
+    print(f"🕒 Текущее время на графике: {current_time} | Цена GBP/USD: {current_price:.5f}")
+    print("=" * 60)
 
-class LiveTrader:
-    def __init__(self, config: dict, max_bars: int = 2000):
-        """
-        max_bars: Размер кольцевого буфера. 
-        1000 свечей 15m = примерно 10 торговых дней. Идеально для легковесного продакшена.
-        """
-        self.config = config
-        self.max_bars = max_bars
+    # 3. ФАЗА 1: Генерация Альфы (Мозг)
+    print("🧠 [ALPHA AGENT]: Анализ микроструктуры, энтропии и макро-векторов...")
+    signal = alpha_agent.analyze_market(current_market_data)
+    
+    if signal['status'] != 'success':
+        print(f"⚠️ Ошибка генерации сигнала: {signal.get('message')}")
+        return
         
-        # Deque автоматически "выталкивает" старые данные при превышении maxlen.
-        # Это исключает утечку памяти (Memory Leak) при аптайме в несколько месяцев.
-        self.bar_buffer = deque(maxlen=self.max_bars)
-        
-        # Инициализация Мозгов (Слои 2 и 3)
-        self.strategy = InstitutionalSMCStrategy(config)
-        self.portfolio_manager = PortfolioManager(config)
-        
-        # Инициализация ML
-        self.ml_model = None
-        self.ml_features = config.get('ml_features', [
-            'active_setup', 'volatility_z', 'changepoint_prob', 'trend_strength', 
-            'cusum_signal', 'asia_intensity', 'london_intensity', 'ny_intensity', 
-            'session_overlap_score', 'dist_to_pwh', 'dist_to_pwl', 'mtfa_score',"llm_sentiment_score", "is_macro_alignment"
-        ])
-        
-        model_path = config.get('model_path', 'models/meta_model.cbm')
-        try:
-            self.ml_model = CatBoostClassifier().load_model(model_path)
-            logging.info(f"Loaded CatBoost Meta-Labeler from {model_path}")
-        except Exception as e:
-            logging.warning(f"ML model not found: {e}. System will run with baseline Kelly confidence.")
+    print(f"   ► Сигнал: {signal['direction']}")
+    print(f"   ► Сырая вероятность: {signal['raw_probability']:.4f}")
+    print(f"   ► Уверенность нейросети: {signal['confidence_pct']}%")
+    print("-" * 60)
 
-    def warm_up(self, historical_bars: list[dict]):
-        """
-        Метод "разогрева". Перед тем как слушать вебсокет, 
-        нужно загрузить последние 500 свечей по REST API, 
-        иначе индикаторам не на чем будет считаться.
-        """
-        logging.info(f"Warming up state buffer with {len(historical_bars)} bars...")
-        for bar in historical_bars:
-            # Убеждаемся, что timestamp имеет нужный тип перед добавлением
-            self.bar_buffer.append(bar)
+    # 4. ФАЗА 2: Риск-Менеджмент (Босс)
+    print("👔 [CHIEF AGENT]: Оценка волатильности (ATR) и расчет лотности...")
+    account_balance = 10000.0 # Виртуальный депозит $10,000
+    
+    decision = chief_agent.review_signal(signal, current_market_data, account_balance)
+    
+    # 5. ФАЗА 3: Исполнение (Execution)
+    if decision['decision'] == "EXECUTE":
+        print("\n✅ СДЕЛКА ОДОБРЕНА В ПРОДАКШЕН (EXECUTE) ✅")
+        print(f"   🔸 Инструмент:   GBP/USD")
+        print(f"   🔸 Направление:  {decision['action']}")
+        print(f"   🔸 Объем (Лот):  {decision['size_lots']}")
+        print(f"   🔸 Цена Входа:   {decision['entry_price']:.5f}")
+        print(f"   🔸 Stop Loss:    {decision['sl_price']:.5f} (Дистанция: 1.5 ATR)")
+        print(f"   🔸 Take Profit:  {decision['tp_price']:.5f} (Дистанция: 3.0 ATR)")
+        print(f"   🔸 Текущий ATR:  {decision['atr_usd']:.5f}")
+    else:
+        print("\n🚫 СДЕЛКА ОТКЛОНЕНА (HOLD) 🚫")
+        print(f"   Причина: {decision['reason']}")
+        
+    print("=" * 60)
+    print("Ожидание закрытия следующей 15-минутной свечи...")
 
-    def _apply_feature_pipeline(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Применяет Layer 1 на лету к нашему срезу из 500 баров."""
-        df = htf.add_daily_liquidity(df)
-        df = htf.add_htf_fvg(df)
-        df = htf.add_mtfa_trend(df)
-        df = htf.add_advanced_liquidity_and_eq(df)
-        df = ml_features.add_regime_and_changepoint_features(df)
-        df = sessions.add_vector_sessions(df)
-        return df
-
-    def on_new_bar(self, current_bar: dict):
-        """
-        Event-Driven метод. Вызывается основным циклом (или вебсокетом) 
-        в момент закрытия 15-минутной свечи.
-        """
-        # 1. Добавляем новый бар в память (самый старый автоматически удаляется)
-        self.bar_buffer.append(current_bar)
-        
-        # Защита: нам нужно хотя бы 200 баров, чтобы длинные скользящие не выдали NaN
-        if len(self.bar_buffer) < 200:
-            return
-
-        # 2. Конвертируем буфер в DataFrame (на 500 строках это занимает микросекунды)
-        df = pd.DataFrame(self.bar_buffer)
-        df.set_index('timestamp', inplace=True)
-        
-        # 3. Считаем наши тяжелые институциональные фичи
-        try:
-            enriched_df = self._apply_feature_pipeline(df)
-        except Exception as e:
-            logging.error(f"Feature calculation dropped a frame: {e}")
-            return
-            
-        # 4. Берем ТОЛЬКО последнюю строку (именно она отражает рынок "прямо сейчас")
-        current_state = enriched_df.iloc[-1].to_dict()
-        current_state['timestamp'] = enriched_df.index[-1]
-        
-        # === ВЫЗОВ ЛОГИКИ ===
-        # 5. Стратегия (Layer 2)
-        base_signal = self.strategy.generate_signal(current_state)
-        
-        # 6. ML Модель (Layer 3)
-        ml_confidence = self._get_ml_confidence(current_state) if base_signal != 0 else 0.0
-        
-        # 7. Келли Сайзинг и Риск (Layer 3)
-        portfolio_command = self.portfolio_manager.process_signal(
-            base_signal=base_signal,
-            features=current_state,
-            ml_confidence=ml_confidence
-        )
-        
-        # 8. Исполнение (Layer 4)
-        self._execute_real_order(portfolio_command, current_state)
-
-    def _get_ml_confidence(self, features: dict) -> float:
-        if not self.ml_model: 
-            return 0.51 # Baseline
-
-        # Формируем вектор в строгом порядке
-        vector = []
-        for f in self.ml_features:
-            val = features.get(f, 0)
-            if f == 'active_setup' and (val == 0 or val is None):
-                val = "None"
-            vector.append(val)
-            
-        return float(self.ml_model.predict_proba([vector])[0][1])
-
-    def _execute_real_order(self, command: dict, state: dict):
-        """Мост к API брокера (Binance, Bybit, MetaTrader)."""
-        action = command.get('action')
-        
-        if action == 'LIQUIDATE_ALL':
-            logging.error(f"🚨 KILL SWITCH ACTIVATED: {command.get('reason')}. Closing all positions!")
-            # API call: broker.close_all_positions()
-            return
-            
-        if action in ['HOLD', 'SKIP', 'BLOCK']:
-            return
-            
-        if action == 'ENTER':
-            direction = "LONG" if command['direction'] == 1 else "SHORT"
-            risk = command['risk_fraction'] * 100
-            conf = command['ml_confidence'] * 100
-            
-            logging.info(f"🟢 TRADE EXECUTED: {direction} | Risk: {risk:.2f}% | AI Confidence: {conf:.1f}%")
-            # API call: broker.place_order(direction, size=..., stop_loss=state['atr_pct'])
+if __name__ == "__main__":
+    run_paper_trader()

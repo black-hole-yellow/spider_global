@@ -1,5 +1,4 @@
 import os
-import json
 import torch
 import torch.nn as nn
 import numpy as np
@@ -40,23 +39,18 @@ class GlobalAlphaAgent:
     def __init__(self, 
                  model_path="data/processed/core_quantformer.pth", 
                  scaler_path="data/processed/core_scaler.pkl", 
-                 pca_path="data/processed/core_pca.pkl"):
+                 pca_path="data/processed/core_pca.pkl",
+                 features_path="data/processed/core_features.pkl"): # <-- ИСПОЛЬЗУЕМ .pkl
         
-        features_path = "data/processed/core_features.pkl"
-        if not os.path.exists(features_path):
-            raise FileNotFoundError(f"❌ Не найден список обученных фичей: {features_path}")
-        
-        # joblib сам открывает файл в правильном бинарном режиме ('rb')
-        self.tech_features = joblib.load(features_path)
-
         self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         print(f"🤖 Инициализация Alpha Agent на устройстве: {self.device}")
         
-        # Загрузка белого списка фичей (Alpha-R1)
+        # ЗАГРУЗКА БЕЛОГО СПИСКА ФИЧЕЙ (БИНАРНЫЙ ФОРМАТ)
         if not os.path.exists(features_path):
-            raise FileNotFoundError(f"❌ Не найден белый список фичей: {features_path}")
-        with open(features_path, "r", encoding="utf-8") as f:
-            self.tech_features = json.load(f)
+            raise FileNotFoundError(f"❌ Не найден список обученных фичей: {features_path}")
+        
+        # Joblib сам безопасно читает бинарные файлы. Никаких open() и json.load()
+        self.tech_features = joblib.load(features_path)
             
         self.macro_cols = [f'macro_emb_{i}' for i in range(384)]
         self.seq_len = 32
@@ -98,19 +92,16 @@ class GlobalAlphaAgent:
         combined_features = np.hstack([tech_raw, macro_compressed])
         scaled_features = self.scaler.transform(combined_features)
         
-        # 4. Создание Тензора: Формат (Batch, Seq_Len, Features) -> (1, 32, 38)
+        # 4. Создание Тензора
         tensor_input = torch.tensor(scaled_features, dtype=torch.float32).unsqueeze(0).to(self.device)
         
         # 5. Прогноз Трансформера
         with torch.no_grad():
             logit = self.model(tensor_input)
-            prob = torch.sigmoid(logit).item() # Превращаем логит в вероятность от 0.0 до 1.0
+            prob = torch.sigmoid(logit).item() 
             
         # 6. Интерпретация
         direction = "LONG" if prob >= 0.5 else "SHORT"
-        
-        # Confidence (Уверенность): чем дальше от 0.5, тем сильнее сигнал.
-        # Масштабируем от 0% (полная неопределенность) до 100% (абсолютная уверенность)
         confidence = abs(prob - 0.5) * 2 * 100 
         
         return {

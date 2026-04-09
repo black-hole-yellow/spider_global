@@ -1,92 +1,91 @@
 import pandas as pd
 import numpy as np
-import json
-import os
 
-# Импортируем нашего настоящего Агента США
-from us_agent import USAgent
+class ChiefRiskOfficer:
+    def __init__(self, max_risk_per_trade_pct=0.02, min_confidence_threshold=5.0):
+        """
+        max_risk_per_trade_pct: 2% риска на одну сделку (институциональный стандарт)
+        min_confidence_threshold: Если уверенность Агента ниже 5%, мы в сделку не входим
+        """
+        self.max_risk = max_risk_per_trade_pct
+        self.min_confidence = min_confidence_threshold
+        print(f"👔 Chief Agent инициализирован. Макс риск: {self.max_risk*100}%. Порог уверенности: {self.min_confidence}%")
 
-class MockUKAgent:
-    """Временная заглушка для Агента Британии, пока мы не обучим для него Трансформер"""
-    def analyze(self):
-        # Допустим, Банк Англии тоже настроен "по-медвежьи" для фунта
-        return json.dumps({
-            "agent": "UK_Macro_Quant",
-            "direction": "SHORT",
-            "probability": 0.3500,
-            "confidence": 0.6500,
-            "reasoning": "Mock: Слабые данные по ВВП Британии."
-        })
+    def calculate_atr(self, df: pd.DataFrame, period=14):
+        """Считает текущую волатильность для постановки стоп-лосса"""
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = np.max(ranges, axis=1)
+        return true_range.rolling(period).mean().iloc[-1]
 
-class ChiefAgent:
-    def __init__(self, us_agent):
-        self.us_agent = us_agent
-        self.uk_agent = MockUKAgent()
-        
-        # Настройки риск-менеджмента
-        self.min_confidence_threshold = 0.60 # Минимальная средняя уверенность для входа
-        
-    def get_consensus(self, market_data):
-        print("\n[CHIEF] 📞 Запрос аналитики у Агента США...")
-        us_report = json.loads(self.us_agent.analyze(market_data))
-        print(f"   -> US: {us_report['direction']} (Уверенность: {us_report['confidence']:.1%})")
-        
-        print("[CHIEF] 📞 Запрос аналитики у Агента Британии (Mock)...")
-        uk_report = json.loads(self.uk_agent.analyze())
-        print(f"   -> UK: {uk_report['direction']} (Уверенность: {uk_report['confidence']:.1%})")
-        
-        print("\n[CHIEF] ⚖️ Сведение консенсуса...")
-        
-        # 1. Проверка на конфликт
-        if us_report['direction'] != uk_report['direction']:
-            return self._format_decision("HOLD", 0, "Конфликт Агентов. US и UK смотрят в разные стороны. Сделка отменена.")
-            
-        # 2. Агенты согласны. Считаем среднюю уверенность
-        avg_confidence = (us_report['confidence'] + uk_report['confidence']) / 2
-        direction = us_report['direction']
-        
-        # 3. Проверка риск-фильтра
-        if avg_confidence < self.min_confidence_threshold:
-             return self._format_decision("HOLD", avg_confidence, f"Агенты согласны на {direction}, но общая уверенность ({avg_confidence:.1%}) ниже порога риска ({self.min_confidence_threshold:.1%}).")
-             
-        # 4. ФИНАЛЬНЫЙ СИГНАЛ (ЗЕЛЕНЫЙ СВЕТ)
-        return self._format_decision(direction, avg_confidence, f"Строгий консенсус достигнут. Средняя уверенность: {avg_confidence:.1%}.")
+    def review_signal(self, agent_signal: dict, current_market_data: pd.DataFrame, account_balance: float) -> dict:
+        """
+        Принимает сигнал от Global Agent и решает: входить ли, и каким объемом.
+        """
+        if agent_signal.get("status") != "success":
+            return {"decision": "HOLD", "reason": "Отказ нижестоящего агента"}
 
-    def _format_decision(self, action, confidence, reasoning):
-        return json.dumps({
-            "chief_action": action,
-            "final_confidence": round(confidence, 4),
-            "reasoning": reasoning,
-            "ensure_ascii": False
-        }, indent=4)
+        direction = agent_signal["direction"]
+        confidence = agent_signal["confidence_pct"]
+        current_price = current_market_data['close'].iloc[-1]
+
+        # 1. Фильтр неуверенности (Chop filter)
+        if confidence < self.min_confidence:
+            return {
+                "decision": "HOLD",
+                "reason": f"Уверенность ({confidence}%) ниже порога ({self.min_confidence}%)"
+            }
+
+        # 2. Расчет волатильности (ATR)
+        atr = self.calculate_atr(current_market_data)
+        if pd.isna(atr) or atr == 0:
+            return {"decision": "HOLD", "reason": "Невозможно рассчитать ATR"}
+
+        # 3. Динамический Stop Loss и Take Profit (Risk/Reward = 1:2)
+        # Ставим стоп за 1.5 ATR от текущей цены
+        stop_loss_dist = atr * 1.5
+        take_profit_dist = stop_loss_dist * 2.0
+
+        if direction == "LONG":
+            sl_price = current_price - stop_loss_dist
+            tp_price = current_price + take_profit_dist
+        else: # SHORT
+            sl_price = current_price + stop_loss_dist
+            tp_price = current_price - take_profit_dist
+
+        # 4. Position Sizing (Размер позиции)
+        # Рискуем строго % от депозита на расстояние до стоп-лосса
+        risk_amount_usd = account_balance * self.max_risk
+        
+        # Для Форекса: 1 лот GBP/USD = 100,000 GBP. 
+        # Упрощенная формула объема базовой валюты = (Риск в $) / (Дистанция SL в пунктах цены)
+        position_size_units = risk_amount_usd / stop_loss_dist
+        
+        # Округляем до микролотов (0.01 лота = 1000 единиц)
+        position_size_lots = round(position_size_units / 100000, 2)
+        
+        if position_size_lots <= 0.0:
+            return {"decision": "HOLD", "reason": "Слишком маленький депозит для текущего ATR"}
+
+        return {
+            "decision": "EXECUTE",
+            "action": direction,
+            "size_lots": position_size_lots,
+            "entry_price": current_price,
+            "sl_price": round(sl_price, 5),
+            "tp_price": round(tp_price, 5),
+            "confidence": confidence,
+            "atr_usd": round(atr, 5)
+        }
 
 if __name__ == "__main__":
-    # Укажи правильные пути к файлам
-    model_file = "data/processed/us_quantformer.pth"
-    scaler_file = "data/processed/us_scaler.pkl"
-    pca_file = "data/processed/us_pca.pkl"
-    parquet_file = "data/processed/full_merged_dataset.parquet"
+    # Тест
+    dummy_data = pd.DataFrame({'high': [1.2550]*20, 'low': [1.2500]*20, 'close': [1.2525]*20})
+    signal = {"status": "success", "direction": "LONG", "confidence_pct": 12.5}
     
-    try:
-        # Инициализируем реального Агента США
-        real_us_agent = USAgent(model_file, scaler_file, pca_file)
-        
-        # Инициализируем Главного Агента
-        chief = ChiefAgent(real_us_agent)
-        
-        # Грузим данные
-        df = pd.read_parquet(parquet_file)
-        cols_to_use = real_us_agent.tech_features + real_us_agent.macro_cols
-        df_clean = df[cols_to_use].replace([np.inf, -np.inf], np.nan).dropna()
-        recent_market_window = df_clean.tail(32)
-        
-        # Запускаем консенсус
-        final_decision = chief.get_consensus(recent_market_window)
-        
-        print("\n==================================")
-        print("🚀 ФИНАЛЬНОЕ РЕШЕНИЕ ОРКЕСТРАТОРА:")
-        print("==================================")
-        print(final_decision)
-        
-    except Exception as e:
-        print(f"Ошибка: {e}")
+    chief = ChiefRiskOfficer()
+    decision = chief.review_signal(signal, dummy_data, 10000)
+    print("\nВердикт Chief Agent:")
+    print(decision)

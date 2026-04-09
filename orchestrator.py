@@ -1,152 +1,101 @@
-import pandas as pd
-import numpy as np
 import time
-import logging
-from catboost import CatBoostClassifier
-import os
+import datetime
+import pandas as pd
+from live_pipeline import LivePipeline
+from agents.global_agent import GlobalAlphaAgent
+from agents.chief_agent import ChiefRiskOfficer
 
-from research.engine.data_pipeline import DataQualityEngine
-from trading.portfolio.portfolio_manager import PortfolioManager
-from trading.execution.paper_broker import PaperBroker
-from research.validation.stat_tester import StatisticalValidator
+class LiveOrchestrator:
+    def __init__(self):
+        print("Запуск Global Orchestrator...")
+        self.pipeline = LivePipeline()
+        self.alpha_agent = GlobalAlphaAgent()
+        # Chief Agent: Риск 2%, минимальная уверенность для входа 3.0%
+        self.chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
+        self.account_balance = 10000.0 # В будущем здесь будет API запрос к брокеру: get_balance()
 
-from shared.features import htf, ml_features, sessions, macro
-from strategies.library.generic_strategy import InstitutionalSMCStrategy 
-
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-class SystemOrchestrator:
-    def __init__(self, config: dict):
-        self.config = config
-        logging.info("Initializing Quant System Components...")
-        self.data_engine = DataQualityEngine(timeframe_mins=15)
-        self.portfolio_manager = PortfolioManager(config)
-        self.broker = PaperBroker(initial_capital=100000.0, config=config)
-        self.validator = StatisticalValidator()
-        self.strategy = InstitutionalSMCStrategy(config)
-        
-        self.model_path = config.get('model_path', 'models/meta_model.cbm')
-        self.ml_features = config.get('ml_features', [
-            'active_setup', 'volatility_z', 'changepoint_prob', 'trend_strength', 
-            'cusum_signal', 'asia_intensity', 'london_intensity', 'ny_intensity', 
-            'session_overlap_score', 'dist_to_pwh', 'dist_to_pwl', 'mtfa_score', 
-            "llm_sentiment_score", "is_macro_alignment", "active_session_name"
-        ])
-        
-        self.ml_model = None
-        if os.path.exists(self.model_path):
-            logging.info(f"Loading CatBoost Meta-Labeler from {self.model_path}...")
-            self.ml_model = CatBoostClassifier().load_model(self.model_path)
-        else:
-            logging.warning(f"Model not found at {self.model_path}. Will use fallback baseline edge.")
-
-    def get_ml_confidence(self, bar_features: dict) -> float:
-        if self.ml_model is None:
-            return 0.51 
-
+    def fetch_live_data(self) -> pd.DataFrame:
+        """
+        Здесь будет API запрос к брокеру (Oanda/Alpaca/MT5) для скачивания последних 1000 свечей.
+        Пока мы эмулируем live-поток, отрезая кусок от нашего датасета.
+        """
+        # Эмуляция: читаем сырой файл и берем 1000 строк
         try:
-            row = {}
-            for f in self.ml_features:
-                val = bar_features.get(f, 0)
-                if f == 'active_setup' and (val == 0 or pd.isna(val)): val = "None"
-                if f == 'active_session_name' and (val == 0 or pd.isna(val)): val = "Asian"
-                row[f] = val
+            # Используем твой базовый parquet файл или csv
+            df = pd.read_parquet("data/raw/gbpusd_15m.parquet") 
+        except:
+            df = pd.read_csv("data/raw/gbpusd_data.csv")
+            df['time'] = pd.to_datetime(df['time'])
+            df.set_index('time', inplace=True)
+            
+        return df.iloc[-1000:]
+
+    def wait_for_next_candle(self, timeframe_minutes=15):
+        """Синхронизация времени: бот спит до закрытия следующей 15-минутной свечи"""
+        now = datetime.datetime.now()
+        # Считаем, сколько минут осталось до следующего интервала (00, 15, 30, 45)
+        minutes_to_wait = timeframe_minutes - (now.minute % timeframe_minutes)
+        # Вычитаем секунды, чтобы проснуться ровно в 00 секунд
+        seconds_to_wait = (minutes_to_wait * 60) - now.second + 2 # +2 сек запаса, чтобы брокер успел закрыть свечу
+        
+        next_run = now + datetime.timedelta(seconds=seconds_to_wait)
+        print(f"\n💤 Ожидание закрытия свечи. Следующий запуск: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+        #time.sleep(seconds_to_wait)
+        time.sleep(3)
+
+
+    def execute_trade(self, decision: dict):
+        """Отправка приказа Брокеру"""
+        print("\n" + "="*50)
+        print("⚡ ОТПРАВКА ОРДЕРА БРОКЕРУ ⚡")
+        print(f"Инструмент: GBP/USD | Action: {decision['action']} | Size: {decision['size_lots']} Lots")
+        print(f"Entry: Market | SL: {decision['sl_price']} | TP: {decision['tp_price']}")
+        print("="*50 + "\n")
+        # В будущем здесь будет: broker.create_order(symbol="GBP_USD", units=..., sl=...)
+
+    def run(self):
+        print("🚀 Оркестратор переведен в режим LIVE TRADING")
+        
+        while True:
+            try:
+                # 1. Ждем закрытия 15-минутной свечи
+                self.wait_for_next_candle(timeframe_minutes=15)
                 
-            df_input = pd.DataFrame([row]) 
-            probabilities = self.ml_model.predict_proba(df_input)[0]
-            return float(probabilities[1])
-            
-        except Exception as e:
-            logging.error(f"ML Inference error: {e}")
-            return 0.0 
+                print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] 🔄 Новая свеча! Начинаем цикл...")
+                
+                # 2. Скачиваем котировки
+                raw_data = self.fetch_live_data()
+                
+                # 3. In-Memory генерация 500+ фичей
+                start_time = time.time()
+                processed_data = self.pipeline.process_live_data(raw_data)
+                print(f"✅ Фичи рассчитаны за {time.time() - start_time:.2f} сек.")
+                
+                # 4. Мозг (Трансформер) генерирует Альфу
+                signal = self.alpha_agent.analyze_market(processed_data)
+                if signal['status'] != 'success':
+                    print(f"⚠️ Ошибка Агента: {signal.get('message')}")
+                    continue
+                
+                print(f"🧠 Сигнал: {signal['direction']} (Уверенность: {signal['confidence_pct']}%)")
+                
+                # 5. Босс (Chief Risk Officer) проверяет риски
+                decision = self.chief_agent.review_signal(signal, processed_data, self.account_balance)
+                
+                # 6. Исполнение
+                if decision['decision'] == 'EXECUTE':
+                    self.execute_trade(decision)
+                else:
+                    print(f"🛡️ Chief Agent отклонил сделку. Причина: {decision['reason']}")
 
-    def run_pipeline(self, data_filepath: str):
-        start_time = time.time()
-        logging.info(f"Loading and cleaning data from {data_filepath}...")
-        clean_df = self.data_engine.ingest_and_clean(data_filepath).to_pandas()
-        
-        df = clean_df.copy()
-        df.set_index('timestamp', inplace=True)
-        if df.index.tz is None: df.index = df.index.tz_localize('UTC')
-            
-        try:
-            if hasattr(htf, 'add_daily_liquidity'): df = htf.add_daily_liquidity(df)
-            if hasattr(htf, 'add_htf_fvg'): df = htf.add_htf_fvg(df)
-            if hasattr(htf, 'add_mtfa_trend'): df = htf.add_mtfa_trend(df)
-            if hasattr(htf, 'add_advanced_liquidity_and_eq'): df = htf.add_advanced_liquidity_and_eq(df)
-            if hasattr(ml_features, 'add_regime_and_changepoint_features'): df = ml_features.add_regime_and_changepoint_features(df)
-            if hasattr(sessions, 'add_vector_sessions'): df = sessions.add_vector_sessions(df)
-            if hasattr(macro, 'add_macro_events'): df = macro.add_macro_events(df)
-            if hasattr(macro, 'add_llm_semantic_features'): df = macro.add_llm_semantic_features(df)
-        except Exception as e:
-            logging.error(f"Error during feature generation: {e}")
-            
-        df.reset_index(inplace=True)
-        enriched_df = df.dropna()
-        
-        logging.info(f"Starting Event-Driven Backtest on {len(enriched_df)} bars...")
-        records = enriched_df.to_dict('records')
-        
-        for bar in records:
-            current_time = pd.to_datetime(bar['timestamp'])
-            
-            # --- ПРАВИЛО 3: ЗАКРЫВАЕМ ВСЁ В ПЯТНИЦУ ВЕЧЕРОМ ---
-            if current_time.dayofweek == 4 and current_time.hour >= 21:
-                self.broker.execute_command({'action': 'LIQUIDATE_ALL', 'reason': 'Friday_Close'})
-
-            # --- ПРАВИЛО 1: ДИНАМИЧЕСКИЙ РИСК В ЗАВИСИМОСТИ ОТ ДНЯ ---
-            # Четверг (3) -> 3.0. Все остальные -> 2.0
-            dynamic_rr = 3.0 if current_time.dayofweek == 3 else 2.0
-            self.portfolio_manager.win_loss_ratio = dynamic_rr
-            
-            self.broker.update_market_state(bar)
-            self.portfolio_manager.update_drawdown(self.broker.current_daily_dd)
-            
-            base_signal = self.strategy.generate_signal(bar)
-            bar['signal'] = base_signal
-            
-            ml_confidence = self.get_ml_confidence(bar) if base_signal != 0 else 0.0
-            
-            portfolio_command = self.portfolio_manager.process_signal(
-                base_signal=base_signal, features=bar, ml_confidence=ml_confidence
-            )
-            self.broker.execute_command(portfolio_command)
-
-        labeled_df = pd.DataFrame(records)
-        labeled_df.to_csv("data/processed/strategy_labeled_data.csv", index=False)
-        logging.info("Saved labeled dataset (with active setups) for ML training.")
-
-        trade_history = self.broker.trade_history
-        if not trade_history:
-            logging.warning("No trades were executed.")
-            return None
-            
-        report = self.validator.evaluate_strategy(trade_history)
-        
-        logging.info("=== SYSTEM REPORT ===")
-        logging.info(f"Final Equity: ${self.broker.equity:,.2f}")
-        logging.info(f"Total Trades: {report.get('total_trades', 0)}")
-        logging.info(f"Win Rate: {report.get('win_rate', 0)}%")
-        logging.info(f"Classic Sharpe Ratio: {report.get('classic_sharpe', 0)}")
-        logging.info(f"Probabilistic Sharpe Ratio (PSR): {report.get('psr_score', 0)}")
-        
-        mc_res = report.get('monte_carlo', {})
-        if 'error' in mc_res: logging.info(f"Monte Carlo Robustness: SKIPPED ({mc_res['error']})")
-        else: logging.info(f"Monte Carlo Robustness: {'PASS' if mc_res.get('is_robust') else 'FAIL'}")
-            
-        logging.info(f"System Status: {report.get('status', 'UNKNOWN')}")
-        logging.info(f"Time elapsed: {time.time() - start_time:.2f} seconds.")
-        return report
+            except KeyboardInterrupt:
+                print("\n🛑 Робот остановлен пользователем.")
+                break
+            except Exception as e:
+                print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА В ГЛАВНОМ ЦИКЛЕ: {e}")
+                print("Перезапуск цикла через 60 секунд...")
+                time.sleep(60)
 
 if __name__ == "__main__":
-    config = {
-        'max_risk_per_trade': 0.02,
-        'win_loss_ratio': 2.0, # Базовое значение, оно будет меняться Оркестратором в цикле
-        'max_daily_drawdown': 0.05,
-        'commission_per_100k': 2.50,
-        'base_spread_pips': 0.5,
-        'intensity_threshold': 0.3, 
-        'min_trend_score': 5
-    }
-    orchestrator = SystemOrchestrator(config)
-    orchestrator.run_pipeline("data/raw/gbpusd_data.csv")
+    orchestrator = LiveOrchestrator()
+    orchestrator.run()
