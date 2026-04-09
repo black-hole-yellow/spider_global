@@ -72,8 +72,11 @@ class USAgent:
             return json.dumps({"error": f"Нужно {self.seq_len} свечей, получено {len(recent_data_df)}"})
 
         # 1. Извлекаем данные (безопасно)
-        tech_data = recent_data_df[self.tech_features].values
-        macro_data = recent_data_df[self.macro_cols].values
+        # Технические фичи: убираем inf и протягиваем последние значения, если есть пропуски
+        tech_data = recent_data_df[self.tech_features].replace([np.inf, -np.inf], np.nan).ffill().bfill().values
+        
+        # Макро фичи: если новостей не было, заполняем нулями (нейтральный вектор)
+        macro_data = recent_data_df[self.macro_cols].fillna(0.0).values
 
         # 2. Сжимаем макро-данные через PCA
         macro_compressed = self.pca.transform(macro_data)
@@ -126,8 +129,16 @@ if __name__ == "__main__":
         cols_to_use = agent.tech_features + agent.macro_cols
         df_clean = df[cols_to_use].copy()
         
-        # 2. Очищаем от инфинитов и пустых значений только эти числовые колонки
+        # 2. Очищаем данные БЕЗ удаления важных свечей
         df_clean = df_clean.replace([np.inf, -np.inf], np.nan)
+        
+        # Для макро-колонок NaN - это нормально (нет новостей), ставим 0
+        df_clean[agent.macro_cols] = df_clean[agent.macro_cols].fillna(0.0)
+        
+        # Для технических колонок делаем ffill (протягиваем предыдущее значение)
+        df_clean[agent.tech_features] = df_clean[agent.tech_features].ffill()
+        
+        # Дропаем только если в самом начале графика вообще нет технических данных
         df_clean = df_clean.dropna()
         
         # 3. Берем последние 32 идеальные свечи

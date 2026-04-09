@@ -49,11 +49,14 @@ def process_macro_embeddings():
 
     # 4. Сборка финального DataFrame
     print("4. Сборка и форматирование данных...")
-    # Создаем DataFrame, где индекс - это время, а единственная колонка - это сам вектор (список чисел)
-    df_embeddings = pd.DataFrame(index=pd.to_datetime(df_events[time_col]))
     
-    # Сохраняем вектор как список float, чтобы parquet его корректно записал
-    df_embeddings['sentiment_vector'] = embeddings.tolist()
+    # Создаем колонки вместо одного списка
+    columns = [f'macro_emb_{i}' for i in range(embeddings.shape[1])]
+    df_embeddings = pd.DataFrame(
+        embeddings, 
+        index=pd.to_datetime(df_events[time_col]), 
+        columns=columns
+    )
     
     # Сортируем по времени на всякий случай
     df_embeddings.sort_index(inplace=True)

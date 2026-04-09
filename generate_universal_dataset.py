@@ -17,7 +17,8 @@ from shared.features.ml_features import add_regime_and_changepoint_features
 
 def build_universal_dataset():
     input_path = "data/processed/gbpusd_15m.parquet"
-    output_path = "data/processed/gbpusd_with_all_features.csv"
+    macro_path = "data/processed/sentiment_embeddings.parquet"
+    output_path = "data/processed/gbpusd_with_all_features.parquet"
 
     print(f"1. Загрузка непрерывных данных из {input_path}...")
     if not os.path.exists(input_path):
@@ -26,12 +27,40 @@ def build_universal_dataset():
 
     df = pd.read_parquet(input_path)
 
+    # Сортировка индекса — КРИТИЧЕСКИ ВАЖНО для merge_asof
+    df.index = pd.to_datetime(df.index)
+    df.sort_index(inplace=True)
+
     # Убедимся, что индекс - это время (timestamp)
     if 'timestamp' in df.columns:
         df.set_index('timestamp', inplace=True)
     elif df.index.name != 'timestamp':
         df.index = pd.to_datetime(df.index)
         df.index.name = 'timestamp'
+
+    # --- [НОВЫЙ БЛОК: ИНТЕГРАЦИЯ МАКРО] ---
+    if os.path.exists(macro_path):
+        print(f"-> Загрузка макро-эмбеддингов из {macro_path}...")
+        df_macro = pd.read_parquet(macro_path)
+        df_macro.index = pd.to_datetime(df_macro.index)
+        df_macro.sort_index(inplace=True)
+
+        # Merge AsOf: приклеиваем ближайшую ПРОШЛУЮ новость к текущей свече
+        # Это гарантирует отсутствие заглядывания в будущее (Look-ahead bias)
+        df = pd.merge_asof(
+            df, 
+            df_macro, 
+            left_index=True, 
+            right_index=True, 
+            direction='backward'
+        )
+        
+        # Заполняем пустоты нулями (если новостей не было, сентимент нейтральный)
+        macro_cols = [c for c in df.columns if 'macro_emb' in c]
+        df[macro_cols] = df[macro_cols].fillna(0.0)
+        print(f"-> Макро успешно интегрировано. Колонки: {len(macro_cols)}")
+    else:
+        print("⚠️ ВНИМАНИЕ: sentiment_embeddings.parquet не найден. Продолжаем без макро.")
 
     print(f"Загружено {len(df)} свечей. Начинаем расчет фичей...\n")
 

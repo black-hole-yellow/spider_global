@@ -2,7 +2,8 @@ import pandas as pd
 import inspect
 import traceback
 from shared.features import technical, structural, htf, macro,sessions,ml_features
-
+import json
+import os
 
 class ResearchPipeline:
     """
@@ -62,6 +63,20 @@ class ResearchPipeline:
 
             # 2. Extract required features from the Strategy
             required_features = strategy.get_required_features()
+            
+            # [ДОБАВЛЕНО]: Alpha Screening Filter
+            alpha_file = "data/processed/alpha_r1_features.json"
+            if os.path.exists(alpha_file):
+                with open(alpha_file, 'r') as f:
+                    surviving_features = set(json.load(f))
+                
+                original_count = len(required_features)
+                # Оставляем только те фичи, которые прошли аудит (или базовые, которых там нет, например OHLC)
+                required_features = [f for f in required_features if f in surviving_features or f in ['open', 'high', 'low', 'close', 'volume']]
+                print(f"🛡️ Alpha Filter: Используем {len(required_features)} из {original_count} запрошенных фичей.")
+            else:
+                print("⚠️ ВНИМАНИЕ: Файл alpha_r1_features.json не найден. Фильтрация отключена.")
+
             unique_funcs = {self.feature_registry[f] for f in required_features if f in self.feature_registry}
             
             sorted_funcs = sorted(list(unique_funcs), key=lambda x: x.__name__)

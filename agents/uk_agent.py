@@ -80,9 +80,12 @@ class UKAgent:
 
         if len(recent_data_df) < self.seq_len:
             return json.dumps({"error": "Недостаточно свечей"})
-
-        tech_data = recent_data_df[self.tech_features].values
-        macro_data = recent_data_df[self.macro_cols].values
+        
+        # Технические фичи: убираем inf и протягиваем последние значения, если есть пропуски
+        tech_data = recent_data_df[self.tech_features].replace([np.inf, -np.inf], np.nan).ffill().bfill().values
+        
+        # Макро фичи: если новостей не было, заполняем нулями (нейтральный вектор)
+        macro_data = recent_data_df[self.macro_cols].fillna(0.0).values
 
         macro_compressed = self.pca.transform(macro_data)
         combined_features = np.hstack([tech_data, macro_compressed])
@@ -108,6 +111,41 @@ class UKAgent:
         return json.dumps(response, indent=4)
 
 if __name__ == "__main__":
-    # Тест загрузки (даже если файлов пока нет, скрипт запустится в Mock-режиме)
-    agent = UKAgent("../data/processed/uk_quantformer.pth", "../data/processed/uk_scaler.pkl", "../data/processed/uk_pca.pkl")
-    print(agent.analyze(pd.DataFrame()))
+    # Укажи правильные пути к сохраненным файлам из твоего ноутбука
+    model_file = "data/processed/uk_quantformer.pth"
+    scaler_file = "data/processed/uk_scaler.pkl"
+    pca_file = "data/processed/uk_pca.pkl"
+    parquet_file = "data/processed/full_merged_dataset.parquet"
+    
+    try:
+        agent = UKAgent(model_file, scaler_file, pca_file)
+        
+        print("\nЗагрузка последних данных с рынка...")
+        df = pd.read_parquet(parquet_file)
+        
+        # 1. Извлекаем ТОЛЬКО нужные колонки (чтобы избежать конфликтов типов данных)
+        cols_to_use = agent.tech_features + agent.macro_cols
+        df_clean = df[cols_to_use].copy()
+        
+        # 2. Очищаем данные БЕЗ удаления важных свечей
+        df_clean = df_clean.replace([np.inf, -np.inf], np.nan)
+        
+        # Для макро-колонок NaN - это нормально (нет новостей), ставим 0
+        df_clean[agent.macro_cols] = df_clean[agent.macro_cols].fillna(0.0)
+        
+        # Для технических колонок делаем ffill (протягиваем предыдущее значение)
+        df_clean[agent.tech_features] = df_clean[agent.tech_features].ffill()
+        
+        # Дропаем только если в самом начале графика вообще нет технических данных
+        df_clean = df_clean.dropna()
+        
+        # 3. Берем последние 32 идеальные свечи
+        recent_market_window = df_clean.tail(32)
+        
+        # 4. Агент выносит вердикт
+        decision = agent.analyze(recent_market_window)
+        print("\n🎯 ВЕРДИКТ АГЕНТА ВЕЛИКОБРИТАНИИ:")
+        print(decision)
+        
+    except Exception as e:
+        print(f"Ошибка тестирования: {e}")
