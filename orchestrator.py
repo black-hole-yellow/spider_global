@@ -4,31 +4,23 @@ import pandas as pd
 from live_pipeline import LivePipeline
 from agents.global_agent import GlobalAlphaAgent
 from agents.chief_agent import ChiefRiskOfficer
+from trading.execution.paper_broker import PaperBroker
+from trading.execution.bybit_broker import OandaBroker
 
 class LiveOrchestrator:
     def __init__(self):
         print("Запуск Global Orchestrator...")
         self.pipeline = LivePipeline()
         self.alpha_agent = GlobalAlphaAgent()
-        # Chief Agent: Риск 2%, минимальная уверенность для входа 3.0%
         self.chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
-        self.account_balance = 10000.0 # В будущем здесь будет API запрос к брокеру: get_balance()
+
+        # ПОДКЛЮЧАЕМ БРОКЕРА
+        self.broker = PaperBroker() 
+        # В идеале баланс нужно запрашивать так: self.account_balance = self.broker.get_balance()
+        self.account_balance = 10000.0
 
     def fetch_live_data(self) -> pd.DataFrame:
-        """
-        Здесь будет API запрос к брокеру (Oanda/Alpaca/MT5) для скачивания последних 1000 свечей.
-        Пока мы эмулируем live-поток, отрезая кусок от нашего датасета.
-        """
-        # Эмуляция: читаем сырой файл и берем 1000 строк
-        try:
-            # Используем твой базовый parquet файл или csv
-            df = pd.read_parquet("data/raw/gbpusd_15m.parquet") 
-        except:
-            df = pd.read_csv("data/raw/gbpusd_data.csv")
-            df['time'] = pd.to_datetime(df['time'])
-            df.set_index('time', inplace=True)
-            
-        return df.iloc[-1000:]
+        return self.broker.get_historical_data(symbol="GBP/USD", timeframe="15m", limit=1000)
 
     def wait_for_next_candle(self, timeframe_minutes=15):
         """Синхронизация времени: бот спит до закрытия следующей 15-минутной свечи"""
@@ -40,8 +32,7 @@ class LiveOrchestrator:
         
         next_run = now + datetime.timedelta(seconds=seconds_to_wait)
         print(f"\n💤 Ожидание закрытия свечи. Следующий запуск: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-        #time.sleep(seconds_to_wait)
-        time.sleep(3)
+        time.sleep(seconds_to_wait)
 
 
     def execute_trade(self, decision: dict):
@@ -51,7 +42,21 @@ class LiveOrchestrator:
         print(f"Инструмент: GBP/USD | Action: {decision['action']} | Size: {decision['size_lots']} Lots")
         print(f"Entry: Market | SL: {decision['sl_price']} | TP: {decision['tp_price']}")
         print("="*50 + "\n")
-        # В будущем здесь будет: broker.create_order(symbol="GBP_USD", units=..., sl=...)
+        
+        # РЕАЛЬНЫЙ ВЫЗОВ
+        try:
+            # Названия аргументов зависят от твоего класса PaperBroker
+            self.broker.place_order(
+                symbol="GBP/USD",
+                order_type="MARKET",
+                side=decision['action'], # "LONG" / "SHORT"
+                volume=decision['size_lots'],
+                stop_loss=decision['sl_price'],
+                take_profit=decision['tp_price']
+            )
+            print("✅ Ордер успешно передан брокеру!")
+        except Exception as e:
+            print(f"❌ Ошибка отправки ордера: {e}")
 
     def run(self):
         print("🚀 Оркестратор переведен в режим LIVE TRADING")

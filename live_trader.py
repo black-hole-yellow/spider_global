@@ -1,75 +1,95 @@
+import os
 import time
-import pandas as pd
+import datetime
+import pandas as pd  # <--- КРИТИЧЕСКИ ВАЖНО
+from dotenv import load_dotenv
+from live_pipeline import LivePipeline # Проверь путь к файлу
 from agents.global_agent import GlobalAlphaAgent
 from agents.chief_agent import ChiefRiskOfficer
+from trading.execution.bybit_broker import BybitBroker
+# Загружаем ключи из .env
+load_dotenv()
 
-def run_paper_trader():
-    print("🚀 Запуск Live Trader (Режим Paper Trading)...")
-    
-    # 1. Инициализация Агентов
-    try:
-        alpha_agent = GlobalAlphaAgent()
-        # Chief Agent разрешает сделки только с уверенностью > 3.0% и риском 2%
-        chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
-    except Exception as e:
-        print(f"❌ Ошибка инициализации: {e}")
-        return
-
-    # 2. Подключение к потоку данных
-    # В реальном времени здесь будет API запрос к Oanda/Binance. 
-    # Сейчас берем последний срез нашего идеального датасета.
-    dataset_path = "data/processed/full_merged_dataset.parquet"
-    print(f"\n📊 Подключение к потоку данных: {dataset_path}")
-    
-    try:
-        df = pd.read_parquet(dataset_path)
-    except FileNotFoundError:
-        print("❌ Датасет не найден. Сначала выполни сборку данных.")
-        return
-    
-    # Имитируем "Текущий момент" - берем последние 32 свечи
-    current_market_data = df.iloc[-32:].copy()
-    current_price = current_market_data['close'].iloc[-1]
-    current_time = current_market_data.index[-1]
-    
-    print(f"🕒 Текущее время на графике: {current_time} | Цена GBP/USD: {current_price:.5f}")
-    print("=" * 60)
-
-    # 3. ФАЗА 1: Генерация Альфы (Мозг)
-    print("🧠 [ALPHA AGENT]: Анализ микроструктуры, энтропии и макро-векторов...")
-    signal = alpha_agent.analyze_market(current_market_data)
-    
-    if signal['status'] != 'success':
-        print(f"⚠️ Ошибка генерации сигнала: {signal.get('message')}")
-        return
+class BybitTradFiBot:
+    def __init__(self):
+        print("🤖 Инициализация Квантовой Системы Bybit...")
         
-    print(f"   ► Сигнал: {signal['direction']}")
-    print(f"   ► Сырая вероятность: {signal['raw_probability']:.4f}")
-    print(f"   ► Уверенность нейросети: {signal['confidence_pct']}%")
-    print("-" * 60)
-
-    # 4. ФАЗА 2: Риск-Менеджмент (Босс)
-    print("👔 [CHIEF AGENT]: Оценка волатильности (ATR) и расчет лотности...")
-    account_balance = 10000.0 # Виртуальный депозит $10,000
-    
-    decision = chief_agent.review_signal(signal, current_market_data, account_balance)
-    
-    # 5. ФАЗА 3: Исполнение (Execution)
-    if decision['decision'] == "EXECUTE":
-        print("\n✅ СДЕЛКА ОДОБРЕНА В ПРОДАКШЕН (EXECUTE) ✅")
-        print(f"   🔸 Инструмент:   GBP/USD")
-        print(f"   🔸 Направление:  {decision['action']}")
-        print(f"   🔸 Объем (Лот):  {decision['size_lots']}")
-        print(f"   🔸 Цена Входа:   {decision['entry_price']:.5f}")
-        print(f"   🔸 Stop Loss:    {decision['sl_price']:.5f} (Дистанция: 1.5 ATR)")
-        print(f"   🔸 Take Profit:  {decision['tp_price']:.5f} (Дистанция: 3.0 ATR)")
-        print(f"   🔸 Текущий ATR:  {decision['atr_usd']:.5f}")
-    else:
-        print("\n🚫 СДЕЛКА ОТКЛОНЕНА (HOLD) 🚫")
-        print(f"   Причина: {decision['reason']}")
+        # Проверка: загрузились ли ключи?
+        key = os.getenv("BYBIT_KEY")
+        secret = os.getenv("BYBIT_SECRET")
         
-    print("=" * 60)
-    print("Ожидание закрытия следующей 15-минутной свечи...")
+        if not key or not secret:
+            print("❌ ОШИБКА: Ключи не найдены! Проверь файл .env и его расположение.")
+        else:
+            print(f"🔑 Ключи найдены: {key[:5]}***")
+
+        self.pipeline = LivePipeline()
+        self.alpha_agent = GlobalAlphaAgent()
+        # ... остальной код без изменений
+        self.chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
+        
+        # Инициализируем брокера. Тестнет=True для безопасности!
+        self.broker = BybitBroker(
+            api_key=os.getenv("BYBIT_KEY"),
+            api_secret=os.getenv("BYBIT_SECRET"),
+            testnet=True 
+        )
+        self.symbol = "BTCUSDT"
+
+    def run_iteration(self):
+        print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] --- Новый цикл анализа ---")
+        
+        # 1. Обновляем состояние кошелька
+        self.broker.update_market_state()
+        print(f"💰 Баланс: ${self.broker.equity:.2f}")
+
+        # 2. Получаем ЖИВЫЕ котировки с биржи
+        raw_data = self.broker.get_live_klines(self.symbol, limit=500)
+        if raw_data.empty: return
+
+        # 3. Считаем фичи (In-Memory)
+        processed_data = self.pipeline.process_live_data(raw_data)
+
+        # 4. Прогноз нейросети
+        signal = self.alpha_agent.analyze_market(processed_data)
+        print(f"🧠 Сигнал: {signal['direction']} (Уверенность: {signal['confidence_pct']}%)")
+
+        # 5. Риск-менеджмент и исполнение
+        decision = self.chief_agent.review_signal(signal, processed_data, self.broker.equity)
+        
+        if decision['decision'] == 'EXECUTE':
+            print(f"🔥 ИСПОЛНЯЕМ ОРДЕР: {decision['action']} {decision['size_lots']} лотов")
+            self.broker.execute_command(decision)
+        else:
+            print(f"🛡️ Пропуск: {decision['reason']}")
+
+    def start(self, fast_mode=True):
+        print(f"🚀 Бот запущен. Режим: {'БЫСТРЫЙ ТЕСТ' if fast_mode else 'LIVE'}")
+        
+        while True:
+            if not fast_mode:
+                # Стандартная синхронизация с 15-минутным баром
+                now = datetime.datetime.now()
+                wait_time = (15 - (now.minute % 15)) * 60 - now.second + 2
+                print(f"💤 Ожидание следующей свечи: {wait_time} сек.")
+            else:
+                # В режиме теста просто ждем 5 секунд между попытками
+                wait_time = 5
+                print(f"🧪 ТЕСТОВЫЙ ЗАПУСК. Пауза {wait_time} сек...")
+            
+            time.sleep(wait_time)
+            
+            try:
+                self.run_iteration()
+                
+                # Если мы в режиме теста и успешно совершили итерацию, 
+                # можно даже выйти после первого раза, чтобы не спамить ордерами.
+                # if fast_mode: break 
+                
+            except Exception as e:
+                print(f"💥 Ошибка в цикле: {e}")
+                time.sleep(10)
 
 if __name__ == "__main__":
-    run_paper_trader()
+    bot = BybitTradFiBot()
+    bot.start()
