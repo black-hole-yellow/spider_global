@@ -5,7 +5,7 @@ from live_pipeline import LivePipeline
 from agents.global_agent import GlobalAlphaAgent
 from agents.chief_agent import ChiefRiskOfficer
 from trading.execution.paper_broker import PaperBroker
-from trading.execution.bybit_broker import OandaBroker
+from trading.execution.capital_broker import OandaBroker
 
 class LiveOrchestrator:
     def __init__(self):

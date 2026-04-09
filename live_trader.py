@@ -6,35 +6,34 @@ from dotenv import load_dotenv
 from live_pipeline import LivePipeline # Проверь путь к файлу
 from agents.global_agent import GlobalAlphaAgent
 from agents.chief_agent import ChiefRiskOfficer
-from trading.execution.bybit_broker import BybitBroker
+from trading.execution.capital_broker import CapitalComBroker
 # Загружаем ключи из .env
 load_dotenv()
 
-class BybitTradFiBot:
+class TradFiBot:
     def __init__(self):
-        print("🤖 Инициализация Квантовой Системы Bybit...")
-        
-        # Проверка: загрузились ли ключи?
-        key = os.getenv("BYBIT_KEY")
-        secret = os.getenv("BYBIT_SECRET")
-        
-        if not key or not secret:
-            print("❌ ОШИБКА: Ключи не найдены! Проверь файл .env и его расположение.")
-        else:
-            print(f"🔑 Ключи найдены: {key[:5]}***")
+        print("🤖 Инициализация Квантовой Системы Capital.com...")
+
+        api_key = os.getenv("CAPITAL_API_KEY")
+        identifier = os.getenv("CAPITAL_IDENTIFIER") # Твой email или ID пользователя
+        password = os.getenv("CAPITAL_PASSWORD")
+
+        if not api_key or not password:
+            print("❌ ОШИБКА: Ключи Capital.com не найдены в .env!")
 
         self.pipeline = LivePipeline()
         self.alpha_agent = GlobalAlphaAgent()
-        # ... остальной код без изменений
         self.chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
-        
-        # Инициализируем брокера. Тестнет=True для безопасности!
-        self.broker = BybitBroker(
-            api_key=os.getenv("BYBIT_KEY"),
-            api_secret=os.getenv("BYBIT_SECRET"),
-            testnet=True 
+
+        self.broker = CapitalComBroker(
+            api_key=api_key,
+            identifier=identifier,
+            password=password,
+            is_demo=True # Оставляем демо для тестов
         )
-        self.symbol = "ETHUSDT"
+        # У Capital.com тикеры (epics) могут отличаться, например CS.D.GBPUSD.MINI.IP
+        # Для начала попробуем стандартный GBPUSD
+        self.epic = "GBPUSD"
 
     def run_iteration(self):
         print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] --- Новый цикл анализа ---")
@@ -44,7 +43,7 @@ class BybitTradFiBot:
         print(f"💰 Баланс: ${self.broker.equity:.2f}")
 
         # 2. Получаем ЖИВЫЕ котировки с биржи
-        raw_data = self.broker.get_live_klines(self.symbol, limit=500)
+        raw_data = self.broker.get_live_klines(self.epic, limit=500)
         if raw_data.empty: return
 
         # 3. Считаем фичи (In-Memory)
@@ -54,14 +53,12 @@ class BybitTradFiBot:
         signal = self.alpha_agent.analyze_market(processed_data)
         print(f"🧠 Сигнал: {signal['direction']} (Уверенность: {signal['confidence_pct']}%)")
 
-        # 5. Риск-менеджмент (Chief Agent)
+        # 5. Риск-менеджмент и исполнение
         decision = self.chief_agent.review_signal(signal, processed_data, self.broker.equity)
-        
+
         if decision['decision'] == 'EXECUTE':
-            print(f"🔥 Сигнал подтвержден Риск-Менеджером!")
-            self.broker.execute_command(decision) # Теперь тут будут и SL, и TP
-        else:
-            print(f"🛡️ Сделка отклонена CRO: {decision['reason']}")
+            print(f"🔥 ИСПОЛНЯЕМ ОРДЕР: {decision['action']}")
+            self.broker.execute_command(decision, epic=self.epic)
 
     def start(self, fast_mode=True):
         print(f"🚀 Бот запущен. Режим: {'БЫСТРЫЙ ТЕСТ' if fast_mode else 'LIVE'}")
@@ -91,5 +88,5 @@ class BybitTradFiBot:
                 time.sleep(10)
 
 if __name__ == "__main__":
-    bot = BybitTradFiBot()
+    bot = TradFiBot()
     bot.start()
