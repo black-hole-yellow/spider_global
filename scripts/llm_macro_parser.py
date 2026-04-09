@@ -66,7 +66,8 @@ def process_macro_embeddings():
     df_embeddings.to_parquet(output_path, engine='pyarrow')
     
     print(f"ГОТОВО! 🎉 Эмбеддинги сохранены в {output_path}")
-    print(f"Размерность одного вектора: {len(df_embeddings['sentiment_vector'].iloc[0])} признаков.")
+    # Теперь мы просто считаем количество колонок в DataFrame
+    print(f"Размерность одного вектора: {len(df_embeddings.columns)} признаков.")
 
 if __name__ == "__main__":
     process_macro_embeddings()

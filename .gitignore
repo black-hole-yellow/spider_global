@@ -181,9 +181,7 @@ cython_debug/
 .cursorindexingignore
 
 
-catboost_info/
-data/
 research/audits/
-notebooks/catboost_info/
 strategies/configs/
-batch_results_log.csv
+data/raw
+data/processed
