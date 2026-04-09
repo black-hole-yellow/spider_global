@@ -190,6 +190,7 @@ def add_bayesian_regime_probabilities(df: pd.DataFrame, lookback: int = 500) -> 
     df['regime_break_prob'] = prob_break
     
     # Заменяем нули в начале на NaN
-    df.loc[:lookback, ['regime_chop_prob', 'regime_trend_prob', 'regime_break_prob']] = np.nan
+    cols = ['regime_chop_prob', 'regime_trend_prob', 'regime_break_prob']
+    df.loc[df.index[:lookback], cols] = np.nan
     
     return df

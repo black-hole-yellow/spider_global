@@ -1,91 +1,70 @@
 import pandas as pd
-import os
 import numpy as np
+import os
+import importlib
+import inspect
 
-# Импортируем все функции из твоих модулей
-from shared.features.technical import (
-    calculate_atr, calculate_rsi, calculate_volatility_zscore,
-    add_log_returns, add_atr, add_volatility_zscore, add_normalized_slope,
-    add_markov_regime, add_hmm_volatility_regime, add_algo_vol_crush,
-    add_ifvg_signals, add_m15_structure
-)
-from shared.features.structural import add_structural_features
-from shared.features.sessions import add_vector_sessions
-from shared.features.htf import (
-    add_daily_liquidity, add_htf_fvg, add_mtfa_trend, add_advanced_liquidity_and_eq
-)
-from shared.features.ml_features import add_regime_and_changepoint_features
-
-def build_universal_dataset():
-    input_path = "data/processed/gbpusd_15m.parquet"
-    output_path = "data/processed/gbpusd_with_all_features.parquet"
-
-    print(f"1. Загрузка чистых 15-минутных котировок из {input_path}...")
-    if not os.path.exists(input_path):
-        print(f"❌ Ошибка: Файл котировок не найден! Убедись, что базовые данные скачаны.")
-        return
+def load_raw_data():
+    """Загрузка сырых котировок (OHLCV)"""
+    # Поддерживаем и CSV, и Parquet
+    csv_path = "data/raw/GBPUSD_15m.csv"
+    parquet_path = "data/processed/gbpusd_15m.parquet"
     
-    df = pd.read_parquet(input_path)
-    df.index = pd.to_datetime(df.index)
-    
-    # Избавляемся от таймзон для безопасности перед будущими склейками
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
+    if os.path.exists(parquet_path):
+        df = pd.read_parquet(parquet_path)
+    elif os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        # Ищем колонку с датой (time, date, timestamp)
+        date_col = next((c for c in df.columns if c.lower() in ['time', 'date', 'timestamp']), df.columns[0])
+        df[date_col] = pd.to_datetime(df[date_col])
+        df.set_index(date_col, inplace=True)
+    else:
+        raise FileNotFoundError("❌ Не найден файл сырых данных в data/raw/")
+        
+    # Приводим названия колонок к нижнему регистру (open, high, low, close, volume)
+    df.columns = [c.lower() for c in df.columns]
     df.sort_index(inplace=True)
+    return df
 
-    print(f"\n2. Начинаем расчет технических и структурных фичей...")
-    try:
-        # --- Блок 1: Базовая техника и волатильность ---
-        print("   -> Расчет технических индикаторов...")
-        df = calculate_atr(df)
-        df = calculate_rsi(df)
-        df = calculate_volatility_zscore(df)
-        df = add_log_returns(df)
-        df = add_atr(df)
-        df = add_volatility_zscore(df)
-        df = add_normalized_slope(df)
-        
-        # --- Блок 2: Режимы рынка ---
-        print("   -> Определение режимов рынка...")
-        df = add_markov_regime(df) 
-        df = add_hmm_volatility_regime(df)
-        df = add_algo_vol_crush(df)
-        
-        # --- Блок 3: Микроструктура ---
-        print("   -> Анализ SMC и микроструктуры...")
-        df = add_ifvg_signals(df)
-        df = add_m15_structure(df)
-        df = add_structural_features(df)
-        df = add_vector_sessions(df)
-        
-        # --- Блок 4: Старшие таймфреймы (HTF) ---
-        print("   -> Проекция старших таймфреймов (HTF)...")
-        df = add_daily_liquidity(df)
-        df = add_htf_fvg(df)
-        df = add_mtfa_trend(df)
-        df = add_advanced_liquidity_and_eq(df)
-        
-        # --- Блок 5: Продвинутые ML-фичи ---
-        print("   -> Генерация ML-фичей...")
-        df = add_regime_and_changepoint_features(df)
+def generate_dynamic_dataset():
+    print("1. Загрузка сырых OHLCV данных...")
+    df = load_raw_data()
+    print(f"Загружено {len(df)} свечей.")
 
-    except Exception as e:
-        print(f"\n❌ Ошибка при расчете фичей: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-
-    # Очистка
-    print("\n3. Финальная очистка (удаление начальных строк с NaN из-за скользящих окон)...")
-    # Удаляем только те строки, где нет базовых фичей (чтобы не убить весь датасет из-за одной редкой фичи)
-    df.dropna(subset=['rsi', 'atr', 'log_return'], inplace=True)
-
-    print(f"4. Сборка завершена. Получено колонок: {len(df.columns)}")
-    print(f"5. Сохранение в {output_path}...")
+    print("\n2. Динамическая генерация фичей (Meta-Programming)...")
+    features_dir = "shared/features"
     
+    # Находим все .py файлы в папке фичей (кроме системных)
+    modules = [f[:-3] for f in os.listdir(features_dir) 
+               if f.endswith('.py') and f not in ['__init__.py', 'decorators.py']]
+    
+    for mod_name in modules:
+        print(f"  📦 Модуль: {mod_name}.py")
+        # Динамически импортируем модуль
+        module = importlib.import_module(f"shared.features.{mod_name}")
+        
+        # Ищем все функции, которые начинаются с 'add_'
+        for name, func in inspect.getmembers(module, inspect.isfunction):
+            if name.startswith('add_'):
+                try:
+                    df = func(df)
+                    print(f"    ✅ Выполнено: {name}")
+                except Exception as e:
+                    print(f"    ❌ Ошибка в {name}: {e}")
+
+    print("\n3. Базовая очистка...")
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    
+    # Заполняем пропуски (современный синтаксис Pandas 2.0+)
+    df.ffill(inplace=True)
+    df.fillna(0, inplace=True) 
+
+    output_path = "data/processed/gbpusd_with_all_features.parquet"
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df.to_parquet(output_path, engine='pyarrow')
-    print("✅ ГОТОВО! Технический Feature Store (gbpusd_with_all_features.parquet) успешно сгенерирован.")
+    
+    print(f"✅ УСПЕХ! Сгенерировано {len(df.columns)} колонок.")
+    print(f"💾 Датасет сохранен в: {output_path}")
 
 if __name__ == "__main__":
-    build_universal_dataset()
+    generate_dynamic_dataset()

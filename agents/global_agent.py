@@ -40,16 +40,22 @@ class GlobalAlphaAgent:
     def __init__(self, 
                  model_path="data/processed/core_quantformer.pth", 
                  scaler_path="data/processed/core_scaler.pkl", 
-                 pca_path="data/processed/core_pca.pkl",
-                 alpha_path="data/processed/alpha_r1_features.json"):
+                 pca_path="data/processed/core_pca.pkl"):
         
+        features_path = "data/processed/core_features.pkl"
+        if not os.path.exists(features_path):
+            raise FileNotFoundError(f"❌ Не найден список обученных фичей: {features_path}")
+        
+        # joblib сам открывает файл в правильном бинарном режиме ('rb')
+        self.tech_features = joblib.load(features_path)
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         print(f"🤖 Инициализация Alpha Agent на устройстве: {self.device}")
         
         # Загрузка белого списка фичей (Alpha-R1)
-        if not os.path.exists(alpha_path):
-            raise FileNotFoundError(f"❌ Не найден белый список фичей: {alpha_path}")
-        with open(alpha_path, "r", encoding="utf-8") as f:
+        if not os.path.exists(features_path):
+            raise FileNotFoundError(f"❌ Не найден белый список фичей: {features_path}")
+        with open(features_path, "r", encoding="utf-8") as f:
             self.tech_features = json.load(f)
             
         self.macro_cols = [f'macro_emb_{i}' for i in range(384)]
