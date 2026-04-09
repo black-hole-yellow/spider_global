@@ -1,6 +1,7 @@
 import pandas as pd
-import json
-from pathlib import Path
+import numpy as np
+import os
+from sklearn.mixture import GaussianMixture
 from shared.features.decorators import provides_features
 
 # We pre-register the exact column names your macro hypotheses will ask for
@@ -199,4 +200,89 @@ def add_llm_semantic_features(df: pd.DataFrame, llm_path: str = "data/llm_sentim
     else:
         df['is_macro_alignment'] = 0.0
 
+    return df
+
+@provides_features('macro_divergence_score')
+def add_macro_narrative_divergence(df: pd.DataFrame, forward_window: int = 4) -> pd.DataFrame:
+    """
+    #5: Macro Narrative Divergence Score.
+    Сравнивает вектор макро-новостей с фактической реакцией цены.
+    В идеале мы берем "тон" новости из LLM, но так как у нас в датасете макро-эмбеддинги, 
+    мы аппроксимируем: реагирует ли рынок логично на всплеск макро-активности?
+    """
+    if df.empty or 'macro_emb_0' not in df.columns: return df
+    
+    # Ищем моменты выхода макро-новостей (когда вектор меняется)
+    macro_change = df['macro_emb_0'].diff().abs() > 0
+    
+    # Направление цены после новости (например, за 1 час)
+    future_return = (df['close'].shift(-forward_window) - df['close']) / df['close']
+    
+    # Интенсивность новости (сумма изменений всех 8 главных компонент)
+    macro_cols = [c for c in df.columns if c.startswith('macro_emb_')]
+    if not macro_cols: return df
+    
+    macro_intensity = df[macro_cols].diff().abs().sum(axis=1)
+    
+    # Дивергенция: если интенсивность новости высокая, но цена никуда не пошла (или откатилась), 
+    # это сигнал "поглощения" (Absorption) или ложного нарратива.
+    # (Здесь мы сохраняем историческую реакцию как фичу для будущих паттернов)
+    df['macro_divergence_score'] = macro_intensity * np.abs(future_return)
+    
+    # Так как future_return заглядывает в будущее, мы сдвигаем эту фичу в прошлое,
+    # чтобы модель видела: "Ага, 4 свечи назад была дивергенция, значит сейчас тренд иссяк"
+    df['macro_divergence_score'] = df['macro_divergence_score'].shift(forward_window)
+    df['macro_divergence_score'].fillna(0, inplace=True)
+    
+    return df
+
+@provides_features('macro_regime_1', 'macro_regime_2')
+def add_macro_hmm_regimes(df: pd.DataFrame, lookback: int = 500) -> pd.DataFrame:
+    """
+    #22: Probabilistic Macro Regime States (HMM).
+    Обучает скрытую Марковскую модель (HMM) строго на макро-векторах (без цены),
+    чтобы определить 2 глобальных макро-режима (например: Risk-On / Risk-Off).
+    Выдает вероятность нахождения в каждом режиме.
+    """
+    if df.empty or 'macro_emb_0' not in df.columns or len(df) < lookback: 
+        df['macro_regime_1'] = 0.5
+        df['macro_regime_2'] = 0.5
+        return df
+
+    macro_cols = [c for c in df.columns if c.startswith('macro_emb_')]
+    if not macro_cols: return df
+    
+    # Для HMM берем только первые 2 главные компоненты (PCA), чтобы не перегружать вычисления
+    features = df[macro_cols[:2]].values
+    
+    prob_regime_1 = np.zeros(len(df))
+    prob_regime_2 = np.zeros(len(df))
+    
+    # Пересчитываем HMM раз в неделю (480 свечей)
+    step = 480 
+    
+    for i in range(lookback, len(df), step):
+        window_data = features[i-lookback:i]
+        
+        try:
+            model = hmm.GaussianHMM(n_components=2, covariance_type="diag", n_iter=100, random_state=42)
+            model.fit(window_data)
+            
+            end_idx = min(i+step, len(df))
+            test_data = features[i:end_idx]
+            
+            # Предсказание вероятностей (soft clustering)
+            probs = model.predict_proba(test_data)
+            
+            prob_regime_1[i:end_idx] = probs[:, 0]
+            prob_regime_2[i:end_idx] = probs[:, 1]
+        except:
+            # Fallback
+            end_idx = min(i+step, len(df))
+            prob_regime_1[i:end_idx] = 0.5
+            prob_regime_2[i:end_idx] = 0.5
+
+    df['macro_regime_1'] = prob_regime_1
+    df['macro_regime_2'] = prob_regime_2
+    
     return df

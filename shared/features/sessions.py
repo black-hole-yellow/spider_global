@@ -58,3 +58,33 @@ def add_vector_sessions(df: pd.DataFrame) -> pd.DataFrame:
     df['active_session_name'] = np.select(conditions, choices, default='Asian')
 
     return df
+
+@provides_features('session_liquidity_transfer')
+def add_session_liquidity_transfer(df: pd.DataFrame, window: int = 8) -> pd.DataFrame:
+    """
+    #9: Session Liquidity Transfer Strength.
+    Сравнивает объем текущих торгов с фоновым объемом "тихой" сессии.
+    Например, всплеск объема на открытии Лондона (08:00 GMT) относительно ночной Азии.
+    Высокий трансфер означает сильный направленный институциональный импульс на открытии.
+    """
+    if df.empty or 'volume' not in df.columns: return df
+    
+    # 1. Считаем скользящее среднее объема за последние 8 свечей (2 часа)
+    # Это наш "базовый" фон ликвидности до текущего момента
+    background_volume = df['volume'].shift(1).rolling(window=window).mean()
+    
+    # 2. Вычисляем аномальность текущего объема
+    # Сколько раз текущая 15m свеча превышает средний объем последних 2 часов?
+    volume_surge = df['volume'] / (background_volume + 1e-9)
+    
+    # 3. Придаем силу направлению (Directional Transfer)
+    # Если свеча бычья, трансфер положительный, если медвежья - отрицательный.
+    # range_hl страхует от деления на ноль
+    range_hl = (df['high'] - df['low']).replace(0, 1e-5)
+    bar_direction = (df['close'] - df['open']) / range_hl
+    
+    df['session_liquidity_transfer'] = volume_surge * bar_direction
+    
+    # Чтобы фича работала лучше в ML, сглаживаем её (EMA) или берем логарифм, 
+    # но в данном виде (сигнал-спайк) она отлично подходит для Трансформера.
+    return df

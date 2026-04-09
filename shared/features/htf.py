@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from shared.features.decorators import provides_features, validate_ohlcv
+from shared.features.decorators import provides_features
 
 @provides_features('pdh', 'pdl', 'dist_to_pdh', 'dist_to_pdl', 'pdh_sweep', 'pdl_sweep')
 def add_daily_liquidity(df: pd.DataFrame) -> pd.DataFrame:
@@ -255,4 +255,82 @@ def add_advanced_liquidity_and_eq(df: pd.DataFrame) -> pd.DataFrame:
     df['eqh_active'] = df['is_eqh'].rolling(window=8, min_periods=1).max()
     df['eql_active'] = df['is_eql'].rolling(window=8, min_periods=1).max()
 
+    return df
+
+@provides_features('transfer_entropy_proxy')
+def add_transfer_entropy(df: pd.DataFrame, htf_window: int = 4, lookback: int = 50) -> pd.DataFrame:
+    """
+    #6: Cross-Regime Information Flow (Transfer Entropy Proxy).
+    Строгий расчет Transfer Entropy вычислительно очень тяжел. 
+    Здесь мы используем прокси: насколько прошлый импульс старшего ТФ (например, 1H = 4 свечи) 
+    предсказывает/коррелирует с текущей дисперсией младшего ТФ (15m).
+    Высокая корреляция = младший таймфрейм жестко подчинен старшему.
+    """
+    if df.empty: return df
+    
+    # Доходность 15-минуток
+    ltf_returns = np.log(df['close'] / df['close'].shift(1)).fillna(0)
+    
+    # Доходность старшего таймфрейма (например, 1H = сумма 4-х 15m доходностей)
+    htf_returns = ltf_returns.rolling(window=htf_window).sum()
+    
+    # Сдвигаем HTF на 1 шаг назад, чтобы смотреть, как ПРОШЛЫЙ час влияет на ТЕКУЩИЕ 15 минут
+    htf_lagged = htf_returns.shift(htf_window)
+    
+    # Скользящая корреляция (насколько 15m свечи следуют за вектором прошлого часа)
+    # Используем формулу Пирсона для rolling окна
+    rolling_cov = ltf_returns.rolling(window=lookback).cov(htf_lagged)
+    rolling_std_ltf = ltf_returns.rolling(window=lookback).std()
+    rolling_std_htf = htf_lagged.rolling(window=lookback).std()
+    
+    df['transfer_entropy_proxy'] = rolling_cov / (rolling_std_ltf * rolling_std_htf + 1e-9)
+    return df
+
+@provides_features('vol_term_structure')
+def add_volatility_term_structure(df: pd.DataFrame, ltf_period: int = 14, htf_period: int = 56) -> pd.DataFrame:
+    """
+    #21: Volatility Term Structure Curvature Change.
+    Сравнивает волатильность младшего ТФ (например, 14 баров = 3.5 часа) 
+    с волатильностью старшего ТФ (56 баров = 14 часов).
+    Если кривая инвертируется (LTF Vol > HTF Vol), это признак внезапного шока/смены режима.
+    """
+    if df.empty: return df
+    
+    def calc_atr(high, low, close, period):
+        tr = np.maximum(high - low, np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1))))
+        return tr.rolling(window=period).mean()
+
+    ltf_atr = calc_atr(df['high'], df['low'], df['close'], ltf_period)
+    htf_atr = calc_atr(df['high'], df['low'], df['close'], htf_period)
+    
+    # Отношение: > 1 означает, что в моменте рынок аномально волатильнее, чем его средний фон
+    df['vol_term_structure'] = ltf_atr / (htf_atr + 1e-9)
+    return df
+
+@provides_features('ob_migration_velocity')
+def add_ob_migration_velocity(df: pd.DataFrame, window: int = 96) -> pd.DataFrame:
+    """
+    #20: Order Block Migration Velocity.
+    Считает скорость (в пунктах за свечу), с которой смещаются экстремумы (зоны поддержки/сопротивления).
+    Помогает поймать ускорение или замедление глобального макро-тренда.
+    window = 96 свечей (1 сутки для 15m графика).
+    """
+    if df.empty: return df
+    
+    # Находим текущий локальный максимум и минимум за сутки
+    rolling_max = df['high'].rolling(window=window).max()
+    rolling_min = df['low'].rolling(window=window).min()
+    
+    # Находим прошлый экстремум (сутки назад)
+    prev_max = rolling_max.shift(window)
+    prev_min = rolling_min.shift(window)
+    
+    # Считаем смещение в % от цены
+    max_migration = ((rolling_max - prev_max) / df['close']) * 100
+    min_migration = ((rolling_min - prev_min) / df['close']) * 100
+    
+    # Velocity: берем то смещение, которое сильнее (если растем - max_migration будет > 0)
+    # Если оба растут (например, бычий канал), берем среднюю скорость канала
+    df['ob_migration_velocity'] = (max_migration + min_migration) / 2.0
+    
     return df

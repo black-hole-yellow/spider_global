@@ -101,3 +101,90 @@ def add_structural_features(df: pd.DataFrame) -> pd.DataFrame:
     df.bfill(inplace=True)
     
     return df
+
+@provides_features('inst_footprint_divergence')
+def add_institutional_footprint(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
+    """
+    Institutional Footprint Divergence.
+    Поскольку у нас нет тиковых данных Level 2, мы аппроксимируем Cumulative Volume Delta (CVD).
+    Внутри свечи: если закрытие ближе к High, большая часть объема считается покупками.
+    Дивергенция = разница между наклоном цены и наклоном CVD.
+    """
+    if df.empty or 'volume' not in df.columns: return df
+
+    # Избегаем деления на ноль для дожи-свечей
+    range_hl = (df['high'] - df['low']).replace(0, 1e-5)
+    
+    # Аппроксимация дельты: от -1 (все продали) до +1 (все купили)
+    bar_delta_pct = (df['close'] - df['open']) / range_hl
+    df['bar_volume_delta'] = bar_delta_pct * df['volume']
+    
+    # Кумулятивная дельта за период
+    cvd = df['bar_volume_delta'].rolling(window=lookback).sum()
+    
+    # Нормализуем цену и CVD для сравнения наклонов (Z-score на окне)
+    price_z = (df['close'] - df['close'].rolling(lookback).mean()) / df['close'].rolling(lookback).std()
+    cvd_z = (cvd - cvd.rolling(lookback).mean()) / cvd.rolling(lookback).std()
+    
+    # Если цена растет (Z > 0), а дельта падает (Z < 0) — это скрытые продажи (дивергенция)
+    df['inst_footprint_divergence'] = price_z - cvd_z
+    return df
+
+@provides_features('liquidity_absorption_ratio')
+def add_liquidity_absorption(df: pd.DataFrame, lookback: int = 10) -> pd.DataFrame:
+    """
+    Liquidity Absorption Asymmetry.
+    Измеряет асимметрию поглощения ликвидности через отношение объема к размеру теней (Wicks).
+    Если на графике длинная нижняя тень с огромным объемом — это поглощение продаж лимитными покупателями.
+    """
+    if df.empty or 'volume' not in df.columns: return df
+    
+    # Размер теней
+    upper_wick = df['high'] - np.maximum(df['open'], df['close'])
+    lower_wick = np.minimum(df['open'], df['close']) - df['low']
+    
+    # Объем, приходящийся на 1 пункт тени (усилие/результат)
+    # Используем сглаживание, чтобы убрать шум одиночных свечей
+    avg_vol = df['volume'].rolling(window=lookback).mean()
+    
+    # Сила поглощения покупателями (объем на нижней тени)
+    buy_absorption = (lower_wick / (df['high'] - df['low'] + 1e-5)) * avg_vol
+    
+    # Сила поглощения продавцами (объем на верхней тени)
+    sell_absorption = (upper_wick / (df['high'] - df['low'] + 1e-5)) * avg_vol
+    
+    # Asymmetry Ratio: > 1 (покупатели сильнее поглощают), < -1 (продавцы сильнее)
+    # Используем логарифм для симметрии распределения фичи
+    df['liquidity_absorption_ratio'] = np.log((buy_absorption + 1) / (sell_absorption + 1))
+    
+    return df
+
+@provides_features('sm_conviction_decay')
+def add_conviction_decay(df: pd.DataFrame, lookback: int = 14) -> pd.DataFrame:
+    """
+    #15: Smart Money Conviction Decay.
+    Оценивает затухание (decay) импульса объема после пробития локального экстремума.
+    Помогает модели отличать ложные пробои (False Breakouts) от истинных.
+    """
+    if df.empty or 'volume' not in df.columns: return df
+
+    # Находим локальные пробои (цена закрылась выше/ниже High/Low за последние 14 свечей)
+    rolling_high = df['high'].shift(1).rolling(window=lookback).max()
+    rolling_low = df['low'].shift(1).rolling(window=lookback).min()
+    
+    is_breakout_up = df['close'] > rolling_high
+    is_breakout_down = df['close'] < rolling_low
+    
+    # Сохраняем объем в момент пробоя (Conviction)
+    df['breakout_volume'] = np.where(is_breakout_up | is_breakout_down, df['volume'], np.nan)
+    df['breakout_volume'] = df['breakout_volume'].ffill() # Протягиваем значение вперед
+    
+    # Считаем текущий объем относительно объема первоначального пробоя
+    # Если значение быстро падает к 0.2-0.3, пробой "выдыхается"
+    df['sm_conviction_decay'] = df['volume'] / (df['breakout_volume'] + 1e-5)
+    
+    # Сбрасываем значение до 1.0, если пробоев давно не было, чтобы не копить шум
+    bars_since_breakout = df.groupby((is_breakout_up | is_breakout_down).cumsum()).cumcount()
+    df.loc[bars_since_breakout > lookback * 2, 'sm_conviction_decay'] = 1.0
+    
+    return df

@@ -1,84 +1,106 @@
 import os
 import json
-import ollama
+import time
+import requests
 
-def run_local_alpha_audit():
-    print("1. Загрузка ТОП-14 фичей после математического скрининга...")
-    
-    input_path = "data/processed/top_features.txt"
-    if not os.path.exists(input_path):
-        print(f"Ошибка: Файл {input_path} не найден.")
-        return
+# Настройки LLM для максимальной аналитической глубины (Gemma 4)
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "gemma4:31b" # Измени на "gemma4:26b", если VRAM меньше 24GB
+PASSING_SCORE = 6
 
-    with open(input_path, 'r') as f:
-        features = [line.strip() for line in f.readlines() if line.strip()]
-
-    print(f"Загружено фичей для аудита: {len(features)}")
-    print("2. Обращение к локальной модели через Ollama... (Это может занять пару минут)")
+def get_llm_evaluation(feature_name: str, module_name: str) -> dict:
+    """Отправляет фичу на аудит в локальную LLM (Gemma 4) и требует строгий JSON."""
     
     prompt = f"""
-    You are a Senior Quantitative Researcher at a Tier-1 Hedge Fund.
-    We are building a Time-Series Transformer model to predict the 1-hour forward return of the GBP/USD currency pair.
+    You are a Senior Quantitative Researcher at a top-tier hedge fund.
+    We are building a machine learning model (Transformer) to predict the 15-minute timeframe of the GBP/USD forex pair.
     
-    We have run a statistical screening and found that the following technical features have predictive power on historical data:
-    {features}
+    Evaluate the following feature for its microstructural, statistical, or theoretical edge.
+    Feature Name: '{feature_name}' (located in module '{module_name}')
     
-    Your task is to evaluate the FUNDAMENTAL and MICROSTRUCTURAL logic of each feature for the GBP/USD pair.
-    We want to avoid 'spurious correlations' (math without logic).
+    Provide a score from 1 to 10. 
+    1 = Pure noise, visually biased, or useless for ML.
+    10 = Extremely robust, captures real institutional flow, liquidity, or chaos theory dynamics.
     
-    For each feature, provide:
-    1. A logic score from 1 to 10 (10 is absolute fundamental sense, 1 is pure mathematical noise/overfitting).
-    2. A short, 1-sentence reasoning.
-
-    You must respond ONLY with a JSON object containing an array called "audit", like this:
+    You MUST respond with ONLY a valid JSON object and no other text.
+    Format required:
     {{
-      "audit": [
-        {{
-          "feature_name": "string",
-          "score": int,
-          "reasoning": "string"
-        }}
-      ]
+        "feature": "{feature_name}",
+        "score": <int>,
+        "reasoning": "<1-2 sentences explaining the quantitative edge or lack thereof>"
     }}
     """
-
+    
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "format": "json", # Форсируем вывод JSON
+        "stream": False,
+        "options": {
+            "temperature": 0.0, # Строгая детерминированность, никакой отсебятины
+            "num_predict": 256  # Ограничиваем длину ответа для ускорения
+        }
+    }
+    
     try:
-        # Обращаемся к локальной Ollama
-        response = ollama.chat(
-            model='gemma4',
-            messages=[
-                {"role": "system", "content": "You are a quantitative finance expert. Output strict JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            format='json' # Жестко заставляем модель выдавать JSON
-        )
+        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        response.raise_for_status()
         
-        result_text = response['message']['content']
-        data = json.loads(result_text)
-        audit_results = data.get("audit", [])
+        result_text = response.json().get("response", "{}")
+        return json.loads(result_text)
         
     except Exception as e:
-        print(f"❌ Ошибка при обращении к Ollama или парсинге JSON: {e}")
-        print("Ответ модели (если есть):", result_text if 'result_text' in locals() else "Нет ответа")
-        return
+        print(f"\n⚠️ Ошибка вызова LLM для {feature_name}: {e}")
+        return {"feature": feature_name, "score": 0, "reasoning": "LLM Parsing Failure or Timeout"}
 
-    print("\n3. Результаты аудита и фильтрация (Порог: Score >= 6):")
-    surviving_features = []
-
-    for item in audit_results:
-        status = "✅ ПРИНЯТО" if item['score'] >= 6 else "❌ ОТКЛОНЕНО"
-        print(f"{status} | {item['feature_name']} (Score: {item['score']}) - {item['reasoning']}")
-        
-        if item['score'] >= 6:
-            surviving_features.append(item['feature_name'])
-
+def run_alpha_screener():
+    registry_path = "data/processed/feature_registry.json"
     output_path = "data/processed/alpha_r1_features.json"
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w') as f:
+    audit_log_path = "data/processed/alpha_audit_log.json"
+    
+    print(f"1. Загрузка реестра фичей из {registry_path}...")
+    if not os.path.exists(registry_path):
+        print("❌ Реестр не найден. Сначала запусти build_feature_registry.py")
+        return
+        
+    with open(registry_path, 'r', encoding='utf-8') as f:
+        inventory = json.load(f)
+        
+    print(f"Найдено {len(inventory)} фичей для аудита. Запускаем ИИ-Кванта ({OLLAMA_MODEL})...")
+    
+    surviving_features = []
+    audit_log = []
+    
+    for i, item in enumerate(inventory):
+        feat = item["feature_name"]
+        mod = item["module"]
+        
+        print(f"[{i+1}/{len(inventory)}] Анализ: {feat}...", end=" ", flush=True)
+        
+        evaluation = get_llm_evaluation(feat, mod)
+        score = evaluation.get("score", 0)
+        
+        audit_log.append(evaluation)
+        
+        if score >= PASSING_SCORE:
+            print(f"✅ Прошла (Score: {score})")
+            surviving_features.append(feat)
+        else:
+            print(f"❌ Отклонена (Score: {score})")
+            
+        time.sleep(1.0) # Даем GPU немного остыть (1 секунда) между запросами
+        
+    print("\n2. Аудит завершен!")
+    print(f"🛡️ Выжило фичей: {len(surviving_features)} из {len(inventory)} (Порог: {PASSING_SCORE}+)")
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(surviving_features, f, indent=4)
         
-    print(f"\nАУДИТ ЗАВЕРШЕН. Выжило фичей: {len(surviving_features)} из {len(features)}.")
-    print(f"Элитный список сохранен в {output_path}")
+    with open(audit_log_path, 'w', encoding='utf-8') as f:
+        json.dump(audit_log, f, indent=4)
+        
+    print(f"✅ Белый список (Alpha-R1) сохранен в: {output_path}")
+    print(f"✅ Полный лог обоснований сохранен в: {audit_log_path}")
 
 if __name__ == "__main__":
-    run_local_alpha_audit()
+    run_alpha_screener()
