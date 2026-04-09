@@ -4,7 +4,7 @@ import os
 
 def fetch_fred_series_local(ticker):
     """Читает данные FRED из локальных CSV файлов."""
-    filepath = f"data/raw/fred/{ticker}.csv"
+    filepath = f"data/raw/economic/{ticker}.csv"
     
     print(f"Чтение {ticker} из {filepath}...")
     if not os.path.exists(filepath):
