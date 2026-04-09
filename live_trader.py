@@ -34,7 +34,7 @@ class BybitTradFiBot:
             api_secret=os.getenv("BYBIT_SECRET"),
             testnet=True 
         )
-        self.symbol = "BTCUSDT"
+        self.symbol = "ETHUSDT"
 
     def run_iteration(self):
         print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] --- Новый цикл анализа ---")
@@ -54,14 +54,14 @@ class BybitTradFiBot:
         signal = self.alpha_agent.analyze_market(processed_data)
         print(f"🧠 Сигнал: {signal['direction']} (Уверенность: {signal['confidence_pct']}%)")
 
-        # 5. Риск-менеджмент и исполнение
+        # 5. Риск-менеджмент (Chief Agent)
         decision = self.chief_agent.review_signal(signal, processed_data, self.broker.equity)
         
         if decision['decision'] == 'EXECUTE':
-            print(f"🔥 ИСПОЛНЯЕМ ОРДЕР: {decision['action']} {decision['size_lots']} лотов")
-            self.broker.execute_command(decision)
+            print(f"🔥 Сигнал подтвержден Риск-Менеджером!")
+            self.broker.execute_command(decision) # Теперь тут будут и SL, и TP
         else:
-            print(f"🛡️ Пропуск: {decision['reason']}")
+            print(f"🛡️ Сделка отклонена CRO: {decision['reason']}")
 
     def start(self, fast_mode=True):
         print(f"🚀 Бот запущен. Режим: {'БЫСТРЫЙ ТЕСТ' if fast_mode else 'LIVE'}")

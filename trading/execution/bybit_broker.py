@@ -49,21 +49,32 @@ class BybitBroker:
             logging.error(f"❌ Ошибка данных: {e}")
         return pd.DataFrame()
 
-    def execute_command(self, decision):
-        """Выставление ордера через официальный метод"""
+    def execute_command(self, decision: dict):
         try:
             side = "Buy" if decision['action'] == "LONG" else "Sell"
-            res = self.session.place_order(
-                category="linear",
-                symbol="BTCUSDT",
-                side=side,
-                orderType="Market",
-                qty="0.001",
-                timeInForce="GTC",
-            )
+            
+            # Извлекаем SL и TP из решения, если они там есть
+            sl_price = decision.get('sl_price')
+            tp_price = decision.get('tp_price')
+            
+            params = {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "side": side,
+                "orderType": "Market",
+                "qty": str(decision.get('size_lots', 0.001)),
+                "timeInForce": "GTC",
+            }
+            
+            # Добавляем SL/TP только если они переданы риск-менеджером
+            if sl_price: params["stopLoss"] = str(round(sl_price, 2))
+            if tp_price: params["takeProfit"] = str(round(tp_price, 2))
+
+            res = self.session.place_order(**params)
+            
             if res['retCode'] == 0:
-                logging.info(f"✅ ОРДЕР ВЫПОЛНЕН: {side}")
+                logging.info(f"✅ ОРДЕР С ЛИМИТАМИ ВЫПОЛНЕН: {side} | SL: {sl_price} | TP: {tp_price}")
             else:
-                logging.error(f"❌ Ошибка ордера: {res['retMsg']}")
+                logging.error(f"❌ Ошибка: {res['retMsg']}")
         except Exception as e:
             logging.error(f"❌ Ошибка исполнения: {e}")
