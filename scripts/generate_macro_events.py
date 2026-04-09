@@ -4,7 +4,7 @@ import os
 
 def fetch_fred_series_local(ticker):
     """Читает данные из локальных CSV файлов."""
-    filepath = f"data/raw/economic/{ticker}.csv"
+    filepath = f"data/raw/fred/{ticker}.csv"
     
     if not os.path.exists(filepath):
         print(f"⚠️ Файл не найден: {filepath} (Пропускаем)")
@@ -27,7 +27,7 @@ def fetch_fred_series_local(ticker):
 def generate_universal_macro_events():
     print("1. Загрузка локальных данных US и UK...")
     
-    # Конфигурация: Тикер -> (Страна, Название показателя, Порог изменения)
+    # Конфигурация: Тикер -> (Страна, Название показателя, Валюта, Порог изменения)
     indicators = {
         'FEDFUNDS': ('US', 'Federal Reserve Interest Rate', 'USD', 0.0),
         'CPIAUCSL': ('US', 'CPI Inflation', 'USD', 0.1),
@@ -44,13 +44,15 @@ def generate_universal_macro_events():
             dfs.append(df_ticker)
             
     if not dfs:
-        print("❌ Не найдено ни одного CSV файла в data/raw/economic/")
+        print("❌ Не найдено ни одного CSV файла в data/raw/fred/")
         return []
 
     # Склеиваем все данные в единую таймлайн-таблицу
     df = pd.concat(dfs, axis=1)
     df.sort_index(inplace=True)
-    df = df.loc['2000-01-01':].ffill() # Начинаем с 2000 года, заполняем пустоты
+    
+    # Начинаем с 2000 года, заполняем пустоты (Forward Fill)
+    df = df.loc['2000-01-01':].ffill() 
     
     events = []
     print("2. Синтез текстовых новостей (Feature Generation)...")
@@ -73,7 +75,7 @@ def generate_universal_macro_events():
                 direction = "increased" if change > 0 else "decreased"
                 tone = "hawkish" if change > 0 else "dovish"
                 
-                # Время: Ставки обычно в 14:00 (US) / 12:00 (UK), Инфляция утром
+                # Время: Ставки обычно в 14:00, Инфляция и Безработица утром (08:30)
                 time_str = "14:00:00" if "RATE" in ticker or "FUNDS" in ticker else "08:30:00"
                 timestamp_str = date.strftime(f'%Y-%m-%d {time_str}')
                 
@@ -85,7 +87,7 @@ def generate_universal_macro_events():
                     "impact_currency": currency
                 })
 
-    # Сортируем все события хронологически
+    # Сортируем все события строго хронологически
     events.sort(key=lambda x: x["timestamp"])
     return events
 
