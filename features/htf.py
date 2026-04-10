@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from shared.features.decorators import provides_features
+from features.decorators import provides_features
 
 @provides_features('pdh', 'pdl', 'dist_to_pdh', 'dist_to_pdl', 'pdh_sweep', 'pdl_sweep')
 def add_daily_liquidity(df: pd.DataFrame) -> pd.DataFrame:

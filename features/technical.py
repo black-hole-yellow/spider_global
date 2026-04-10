@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
-from shared.features.decorators import provides_features, validate_ohlcv
+from features.decorators import provides_features, validate_ohlcv
 
 @provides_features('atr')
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
@@ -140,7 +140,7 @@ def add_hmm_volatility_regime(df: pd.DataFrame) -> pd.DataFrame:
 def add_algo_vol_crush(df: pd.DataFrame) -> pd.DataFrame:
     # Assumes ATR is generated. Identifies when volatility spikes rapidly then dies.
     if 'ATR' not in df.columns:
-        from shared.features.technical import add_atr
+        from features.technical import add_atr
         df = add_atr(df)
         
     atr_spike = df['ATR'] > df['ATR'].rolling(50).mean() * 2

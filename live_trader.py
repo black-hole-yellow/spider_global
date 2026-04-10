@@ -8,7 +8,7 @@ from twisted.internet import reactor, task
 from live_pipeline import LivePipeline
 from agents.global_agent import GlobalAlphaAgent
 from agents.chief_agent import ChiefRiskOfficer
-from trading.execution.ctrader_broker import CTraderBroker
+from execution.ctrader_broker import CTraderBroker
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')

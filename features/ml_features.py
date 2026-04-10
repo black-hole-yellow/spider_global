@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from scipy.stats import skew
 from sklearn.mixture import GaussianMixture
-from shared.features.decorators import provides_features
+from features.decorators import provides_features
 
 @provides_features('log_return', 'volatility_z', 'trend_strength', 'cusum_signal', 'changepoint_prob', 'is_anomaly')
 def add_regime_and_changepoint_features(df: pd.DataFrame) -> pd.DataFrame:

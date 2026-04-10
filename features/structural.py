@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from shared.features.decorators import provides_features
+from features.decorators import provides_features
 
 @provides_features(
     'swing_high', 'swing_low', 

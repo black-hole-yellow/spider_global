@@ -3,7 +3,7 @@ import numpy as np
 import os
 from sklearn.mixture import GaussianMixture
 from pathlib import Path
-from shared.features.decorators import provides_features
+from features.decorators import provides_features
 import json
 
 # We pre-register the exact column names your macro hypotheses will ask for
@@ -112,7 +112,7 @@ def add_macro_strategy_triggers(df: pd.DataFrame) -> pd.DataFrame:
     # --- DEPENDENCY INJECTION FIX ---
     # Force the engine to parse macro_events.json before calculating triggers
     if 'NFP_Release_Bar' not in df.columns:
-        from shared.features.macro import add_macro_events
+        from features.macro import add_macro_events
         df = add_macro_events(df)
 
     # Now we safely get the macro flags, knowing they were generated

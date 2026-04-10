@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from shared.features.decorators import provides_features
+from features.decorators import provides_features
 
 @provides_features(
     'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
