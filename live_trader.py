@@ -19,7 +19,6 @@ class CTraderLiveBot:
         self.pipeline = LivePipeline()
         self.alpha_agent = GlobalAlphaAgent()
         self.chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
-        
         self.symbol = "GBPUSD"
 
         # Загрузка ключей cTrader

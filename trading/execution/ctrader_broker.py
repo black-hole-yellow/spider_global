@@ -1,8 +1,10 @@
 import logging
 from ctrader_open_api import Client, EndPoints, TcpProtocol
-from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import *
-from ctrader_open_api.messages.OpenApiMessages_pb2 import *
-from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
+
+# Явный импорт модулей Protobuf для избежания ошибок "is not defined"
+from ctrader_open_api.messages import OpenApiCommonMessages_pb2 as common_msg
+from ctrader_open_api.messages import OpenApiMessages_pb2 as msg
+from ctrader_open_api.messages import OpenApiModelMessages_pb2 as model_msg
 
 class CTraderBroker:
     def __init__(self, client_id: str, client_secret: str, account_id: str, access_token: str, is_demo: bool = True):
@@ -11,29 +13,25 @@ class CTraderBroker:
         self.account_id = int(account_id)
         self.access_token = access_token
         
-        # Выбор сервера (Demo или Live)
         host = EndPoints.PROTOBUF_DEMO_HOST if is_demo else EndPoints.PROTOBUF_LIVE_HOST
         self.client = Client(host, EndPoints.PROTOBUF_PORT, TcpProtocol)
         
         self.equity = 0.0
-        self.symbols_map = {}  # cTrader использует ID вместо тикеров (например, 1 вместо 'GBPUSD')
+        self.symbols_map = {}  
         self.on_ready_callback = None
         
-        # Настройка коллбеков (событий)
         self.client.setConnectedCallback(self._on_connected)
         self.client.setDisconnectedCallback(self._on_disconnected)
         
         logging.info(f"🔌 Инициализация cTrader TCP Протокола ({'DEMO' if is_demo else 'LIVE'})")
 
     def start_connection(self, on_ready_callback):
-        """Запускает TCP сервис и передает коллбек для старта торгового цикла"""
         self.on_ready_callback = on_ready_callback
         self.client.startService()
 
-    # --- ЦЕПОЧКА АВТОРИЗАЦИИ ---
     def _on_connected(self, client):
         logging.info("✅ TCP Подключен. Авторизация приложения...")
-        req = ProtoOAApplicationAuthReq()
+        req = msg.ProtoOAApplicationAuthReq()
         req.clientId = self.client_id
         req.clientSecret = self.client_secret
         df = self.client.send(req)
@@ -41,7 +39,7 @@ class CTraderBroker:
 
     def _on_app_auth(self, res):
         logging.info("✅ Приложение авторизовано. Авторизация аккаунта...")
-        req = ProtoOAAccountAuthReq()
+        req = msg.ProtoOAAccountAuthReq()
         req.ctidTraderAccountId = self.account_id
         req.accessToken = self.access_token
         df = self.client.send(req)
@@ -52,8 +50,7 @@ class CTraderBroker:
         self._fetch_symbols()
 
     def _fetch_symbols(self):
-        """Загружает маппинг всех тикеров брокера"""
-        req = ProtoOASymbolsListReq()
+        req = msg.ProtoOASymbolsListReq()
         req.ctidTraderAccountId = self.account_id
         df = self.client.send(req)
         
@@ -67,15 +64,13 @@ class CTraderBroker:
                 
         df.addCallbacks(on_symbols, self._on_error)
 
-    # --- ТОРГОВЫЕ ОПЕРАЦИИ ---
     def update_market_state(self):
-        """Асинхронный запрос баланса"""
-        req = ProtoOATraderReq()
+        req = msg.ProtoOATraderReq()
         req.ctidTraderAccountId = self.account_id
         df = self.client.send(req)
         
         def on_trader(res):
-            self.equity = res.trader.equity / 100.0  # cTrader возвращает баланс в центах
+            self.equity = res.trader.equity / 100.0  
             logging.info(f"💰 Эквити: ${self.equity}")
             
         df.addCallbacks(on_trader, self._on_error)
@@ -86,19 +81,18 @@ class CTraderBroker:
             logging.error(f"❌ Символ {symbol_name} не найден у брокера.")
             return
 
-        side = PROTO_OA_TRADE_SIDE_BUY if decision['action'] == "LONG" else PROTO_OA_TRADE_SIDE_SELL
+        # Используем константы из model_msg
+        side = model_msg.PROTO_OA_TRADE_SIDE_BUY if decision['action'] == "LONG" else model_msg.PROTO_OA_TRADE_SIDE_SELL
         
-        # Объем в cTrader указывается в единицах базовой валюты (например, 1000 для 0.01 лота)
         volume_units = int(decision.get('size_lots', 0.01) * 100000)
 
-        req = ProtoOANewOrderReq()
+        req = msg.ProtoOANewOrderReq()
         req.ctidTraderAccountId = self.account_id
         req.symbolId = symbol_id
-        req.orderType = PROTO_OA_ORDER_TYPE_MARKET
+        req.orderType = model_msg.PROTO_OA_ORDER_TYPE_MARKET
         req.tradeSide = side
         req.volume = volume_units
         
-        # Установка Стоп-Лосса и Тейк-Профита (в cTrader это делается прямо в ордере)
         sl = decision.get('sl_price')
         tp = decision.get('tp_price')
         if sl: req.stopLoss = float(sl)
@@ -107,7 +101,7 @@ class CTraderBroker:
         df = self.client.send(req)
         
         def on_order(res):
-            logging.info(f"🔥 ОРДЕР ИСПОЛНЕН: {decision['action']} | Объем: {volume_units} ед. | SL: {sl}")
+            logging.info(f"🔥 ОРДЕР ИСПОЛНЕН: {decision['action']} | Объем: {volume_units} ед.")
             
         df.addCallbacks(on_order, self._on_error)
 
