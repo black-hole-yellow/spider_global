@@ -1,92 +1,94 @@
 import os
-import time
-import datetime
-import pandas as pd  # <--- КРИТИЧЕСКИ ВАЖНО
+import logging
+import pandas as pd
 from dotenv import load_dotenv
-from live_pipeline import LivePipeline # Проверь путь к файлу
+from twisted.internet import reactor, task
+
+# Импорты нашего Квантового конвейера
+from live_pipeline import LivePipeline
 from agents.global_agent import GlobalAlphaAgent
 from agents.chief_agent import ChiefRiskOfficer
-from trading.execution.capital_broker import CapitalComBroker
-# Загружаем ключи из .env
+from trading.execution.ctrader_broker import CTraderBroker
+
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-class TradFiBot:
+class CTraderLiveBot:
     def __init__(self):
-        print("🤖 Инициализация Квантовой Системы Capital.com...")
-
-        api_key = os.getenv("CAPITAL_API_KEY")
-        identifier = os.getenv("CAPITAL_IDENTIFIER") # Твой email или ID пользователя
-        password = os.getenv("CAPITAL_PASSWORD")
-
-        if not api_key or not password:
-            print("❌ ОШИБКА: Ключи Capital.com не найдены в .env!")
-
+        logging.info("🤖 Запуск cTrader HFT Системы...")
         self.pipeline = LivePipeline()
         self.alpha_agent = GlobalAlphaAgent()
         self.chief_agent = ChiefRiskOfficer(max_risk_per_trade_pct=0.02, min_confidence_threshold=3.0)
+        
+        self.symbol = "GBPUSD"
 
-        self.broker = CapitalComBroker(
-            api_key=api_key,
-            identifier=identifier,
-            password=password,
-            is_demo=True # Оставляем демо для тестов
+        # Загрузка ключей cTrader
+        client_id = os.getenv("CTRADER_CLIENT_ID")
+        client_secret = os.getenv("CTRADER_CLIENT_SECRET")
+        account_id = os.getenv("CTRADER_ACCOUNT_ID")
+        access_token = os.getenv("CTRADER_ACCESS_TOKEN")
+
+        if not all([client_id, client_secret, account_id, access_token]):
+            logging.error("❌ ОШИБКА: Ключи cTrader не найдены в .env!")
+            return
+
+        self.broker = CTraderBroker(
+            client_id=client_id,
+            client_secret=client_secret,
+            account_id=account_id,
+            access_token=access_token,
+            is_demo=True # Поставь False для реальных денег
         )
-        # У Capital.com тикеры (epics) могут отличаться, например CS.D.GBPUSD.MINI.IP
-        # Для начала попробуем стандартный GBPUSD
-        self.epic = "GBPUSD"
+
+    def start(self):
+        # Запускаем подключение к брокеру. 
+        # Когда авторизация пройдет, вызовется self.start_trading_loop
+        self.broker.start_connection(on_ready_callback=self.start_trading_loop)
+        
+        logging.info("🚀 Запуск асинхронного Event Loop (Twisted)...")
+        reactor.run() # Этот метод блокирует консоль и держит TCP соединение вечно
+
+    def start_trading_loop(self):
+        """Вызывается только после того, как брокер сказал 'Я готов'"""
+        logging.info("✅ Система синхронизирована. Запуск цикла анализа...")
+        
+        # Вместо time.sleep(5) мы используем таймер Twisted
+        self.loop = task.LoopingCall(self.run_iteration)
+        self.loop.start(5.0) # Для Fast Test Mode ставим 5 секунд.
+
+    def get_latest_data(self):
+        # В этой версии мы продолжаем брать свечи из твоего parquet-файла
+        # Для загрузки истории напрямую из cTrader нужен отдельный стриминговый класс
+        try:
+            return pd.read_parquet("data/raw/gbpusd_15m.parquet").iloc[-500:]
+        except:
+            return pd.DataFrame()
 
     def run_iteration(self):
-        print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] --- Новый цикл анализа ---")
+        logging.info("--- Новый такт анализа ---")
         
-        # 1. Обновляем состояние кошелька
+        # 1. Запрашиваем актуальный баланс
         self.broker.update_market_state()
-        print(f"💰 Баланс: ${self.broker.equity:.2f}")
-
-        # 2. Получаем ЖИВЫЕ котировки с биржи
-        raw_data = self.broker.get_live_klines(self.epic, limit=500)
+        
+        raw_data = self.get_latest_data()
         if raw_data.empty: return
 
-        # 3. Считаем фичи (In-Memory)
+        # 2. In-Memory генерация
         processed_data = self.pipeline.process_live_data(raw_data)
 
-        # 4. Прогноз нейросети
+        # 3. Трансформер
         signal = self.alpha_agent.analyze_market(processed_data)
-        print(f"🧠 Сигнал: {signal['direction']} (Уверенность: {signal['confidence_pct']}%)")
+        logging.info(f"🧠 Сигнал: {signal['direction']} (Уверенность: {signal['confidence_pct']}%)")
 
-        # 5. Риск-менеджмент и исполнение
+        # 4. Риск-менеджмент
         decision = self.chief_agent.review_signal(signal, processed_data, self.broker.equity)
-
-        if decision['decision'] == 'EXECUTE':
-            print(f"🔥 ИСПОЛНЯЕМ ОРДЕР: {decision['action']}")
-            self.broker.execute_command(decision, epic=self.epic)
-
-    def start(self, fast_mode=True):
-        print(f"🚀 Бот запущен. Режим: {'БЫСТРЫЙ ТЕСТ' if fast_mode else 'LIVE'}")
         
-        while True:
-            if not fast_mode:
-                # Стандартная синхронизация с 15-минутным баром
-                now = datetime.datetime.now()
-                wait_time = (15 - (now.minute % 15)) * 60 - now.second + 2
-                print(f"💤 Ожидание следующей свечи: {wait_time} сек.")
-            else:
-                # В режиме теста просто ждем 5 секунд между попытками
-                wait_time = 5
-                print(f"🧪 ТЕСТОВЫЙ ЗАПУСК. Пауза {wait_time} сек...")
-            
-            time.sleep(wait_time)
-            
-            try:
-                self.run_iteration()
-                
-                # Если мы в режиме теста и успешно совершили итерацию, 
-                # можно даже выйти после первого раза, чтобы не спамить ордерами.
-                # if fast_mode: break 
-                
-            except Exception as e:
-                print(f"💥 Ошибка в цикле: {e}")
-                time.sleep(10)
+        # 5. Исполнение
+        if decision['decision'] == 'EXECUTE':
+            self.broker.execute_command(decision, symbol_name=self.symbol)
+        else:
+            logging.info(f"🛡️ Пропуск: {decision['reason']}")
 
 if __name__ == "__main__":
-    bot = TradFiBot()
+    bot = CTraderLiveBot()
     bot.start()
