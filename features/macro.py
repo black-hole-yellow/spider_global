@@ -7,7 +7,7 @@ from sklearn.mixture import GaussianMixture
 from hmmlearn.hmm import GaussianHMM
 
 # Pre-register the exact column names your macro hypotheses will ask for
-MACRO_FEATURES = [
+macro_features = [
     'NFP_Day', 'NFP_Release_Bar', 'NFP_Surprise',
     'FOMC_Day', 'FOMC_Release_Bar', 'FOMC_Surprise',
     'US_CPI_Day', 'US_CPI_Release_Bar', 'US_CPI_Surprise',
@@ -38,7 +38,7 @@ def add_macro_embeddings(df: pd.DataFrame, macro_path: str = "data/processed/sen
 
 def add_macro_events(df: pd.DataFrame, events_path: str = "data/macro_events.json") -> pd.DataFrame:
     """Injects macroeconomic data into the price action DataFrame."""
-    for col in MACRO_FEATURES:
+    for col in macro_features:
         df[col] = 0.0
 
     path = Path(events_path)
@@ -92,7 +92,7 @@ def add_macro_events(df: pd.DataFrame, events_path: str = "data/macro_events.jso
         day_mask = df.index.date == event_date
         df.loc[day_mask, f"{prefix}_Day"] = 1.0
 
-    for col in MACRO_FEATURES:
+    for col in macro_features:
         if "Surprise" in col:
             df[col] = df.groupby(df.index.date)[col].ffill().fillna(0.0)
             

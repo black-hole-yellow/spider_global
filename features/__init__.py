@@ -7,7 +7,7 @@ Central registry and master wrapper exports for the ML pipeline.
 # 1. FEATURE MANIFEST (SCHEMA)
 # Used by GlobalAlphaAgent and MetaLabeler to dynamically select/scale inputs
 # =========================================================================
-FEATURE_MANIFEST = {
+feature_manifest = {
     "continuous": [
         "atr", "volatility_zscore", "log_return", "norm_slope", 
         "premium_discount", "dist_to_liq_high", "dist_to_liq_low", 
@@ -67,7 +67,7 @@ from .macro import add_macro_features
 
 # Restricting what gets imported when someone uses `from features import *`
 __all__ = [
-    "FEATURE_MANIFEST",
+    "feature_manifest",
     "add_technical_features",
     "add_structural_features",
     "add_htf_features",
