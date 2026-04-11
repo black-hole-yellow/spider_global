@@ -1,22 +1,45 @@
 import pandas as pd
 import numpy as np
+import warnings
 from scipy.stats import skew
 from sklearn.mixture import GaussianMixture
-from features.decorators import provides_features
 
-@provides_features('log_return', 'volatility_z', 'trend_strength', 'cusum_signal', 'changepoint_prob', 'is_anomaly')
-def add_regime_and_changepoint_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ортогональные фичи для ML и Гибридный детектор изломов (Variance Ratio + CUSUM).
-    Полностью векторизовано и защищено от look-ahead bias.
-    """
-    if df.empty or len(df) < 100: return df
+# Suppress sklearn/scipy warnings during rolling calculations
+warnings.filterwarnings('ignore', category=UserWarning)
 
-    # 1. Zero-lag Returns
-    df['log_return'] = np.log(df['close'] / df['close'].shift(1))
+# =========================================================================
+# 🧠 MASTER WRAPPER (LAYER 5)
+# =========================================================================
+def add_ml_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Master entry point for Machine Learning and Statistical features.
+    Assumes Technical, Structural, HTF, and Session layers are already computed.
+    """
+    if df.empty or len(df) < 100: 
+        return df
+
+    df = _add_regime_and_changepoint(df)
+    df = _add_hurst_and_fractal(df)
+    df = _add_adaptive_volatility_skew(df)
+    df = _add_market_efficiency_index(df)
+    df = _add_bayesian_regime_probabilities(df)
+
+    return df
+
+# =========================================================================
+# 🔬 INTERNAL MODULES
+# =========================================================================
+
+def _add_regime_and_changepoint(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Orthogonal features for ML and Hybrid Changepoint Detector (Variance Ratio + CUSUM).
+    """
+    # 1. Zero-lag Returns (Fallback if technical.py didn't compute it)
+    if 'log_return' not in df.columns:
+        df['log_return'] = np.log(df['close'] / df['close'].shift(1)).fillna(0)
 
     # 2. Orthogonal Features
-    long_window = 96 # 1 день (для 15m)
+    long_window = 96 # 1 day for 15m timeframe
     
     roll_std = df['log_return'].rolling(long_window).std()
     roll_mean = df['log_return'].rolling(long_window).mean()
@@ -27,54 +50,37 @@ def add_regime_and_changepoint_features(df: pd.DataFrame) -> pd.DataFrame:
     tot_move = abs(df['close'] - df['close'].shift(1)).rolling(long_window).sum()
     df['trend_strength'] = dir_move / (tot_move + 1e-8)
 
-    # === 3. HYBRID CHANGEPOINT DETECTION ===
-    
-    # 3.1 Variance Ratio (Краткосрок против Долгосрока)
-    short_window = 8 # 2 часа
+    # 3. Hybrid Changepoint Detection
+    short_window = 8 # 2 hours
     short_std = df['log_return'].rolling(short_window).std()
+    
+    # 3.1 Variance Ratio
     variance_ratio = (short_std ** 2) / (roll_std ** 2 + 1e-8)
     vr_prob = 1 / (1 + np.exp(-2 * (variance_ratio - 2.5)))
 
     # 3.2 CUSUM (Cumulative Sum of Volatility Deviations)
-    # Настраиваем параметры:
-    # k (drift) - допустимое отклонение. Все, что ниже 0.5 Z-score, игнорируем.
     k_drift = 0.5 
-    cusum_threshold = 3.0 # Порог срабатывания
+    cusum_threshold = 3.0 
 
-    # Вычисляем отклонение текущей волатильности с учетом drift
     deviation = df['volatility_z'] - k_drift
-    
-    # Векторизованный CUSUM сброс (S_t = max(0, S_{t-1} + X_t) эквивалентно C_t - min(C_i))
     cumulative_deviation = deviation.cumsum()
-    running_min = cumulative_deviation.cummin()
     
-    # Нормализуем CUSUM, чтобы он не улетал в бесконечность (ограничиваем недавней историей через rolling)
-    # Используем окно в 24 бара (6 часов) для поиска локального минимума
     local_min = cumulative_deviation.rolling(window=24, min_periods=1).min()
     cusum_score = cumulative_deviation - local_min
 
-    # Переводим CUSUM скор в вероятность (0...1)
     df['cusum_signal'] = np.clip(cusum_score / cusum_threshold, 0, 1)
-
-    # 3.3 Итоговая вероятность излома (Максимум из двух методов)
     df['changepoint_prob'] = np.maximum(vr_prob, df['cusum_signal'])
 
-    # 4. Мгновенный Kill Switch
+    # 4. Instant Kill Switch (Anomaly)
     df['is_anomaly'] = np.where((df['volatility_z'] > 4.0) | (df['changepoint_prob'] > 0.90), 1, 0)
 
     return df.fillna(0)
 
-@provides_features('hurst_exponent', 'fractal_dimension')
-def add_hurst_and_fractal(df: pd.DataFrame, lookback: int = 100) -> pd.DataFrame:
+def _add_hurst_and_fractal(df: pd.DataFrame, lookback: int = 100) -> pd.DataFrame:
     """
-    #7 & #17: Local Hurst Exponent & Fractal Dimension Trajectories.
-    Оценивает персистентность рынка:
-    H < 0.5 (Mean Reversion / Шум), H > 0.5 (Тренд / Momentum).
-    Фрактальная размерность D = 2 - H.
+    Local Hurst Exponent & Fractal Dimension Trajectories.
+    H < 0.5 (Mean Reversion), H > 0.5 (Momentum). D = 2 - H.
     """
-    if df.empty or len(df) < lookback: return df
-
-    # Вспомогательная функция для расчета Херста (Аппроксимация через Variance)
     def get_hurst(prices):
         if len(prices) < 20: return np.nan
         lags = range(2, 20)
@@ -82,95 +88,70 @@ def add_hurst_and_fractal(df: pd.DataFrame, lookback: int = 100) -> pd.DataFrame
         poly = np.polyfit(np.log(lags), np.log(tau), 1)
         return poly[0] * 2.0
 
-    # Оптимизация: считаем каждую свечу, используя rolling().apply (будет долго на 25 годах, 
-    # в проде можно переписать на numpy stride tricks, но pandas надежнее для тестов)
     df['hurst_exponent'] = df['close'].rolling(window=lookback).apply(get_hurst, raw=True)
-    
-    # Фрактальная размерность временного ряда (1D)
     df['fractal_dimension'] = 2.0 - df['hurst_exponent']
     
     return df
 
-@provides_features('volatility_skewness')
-def add_adaptive_volatility_skew(df: pd.DataFrame, lookback: int = 50) -> pd.DataFrame:
+def _add_adaptive_volatility_skew(df: pd.DataFrame, lookback: int = 50) -> pd.DataFrame:
     """
-    #1: Adaptive Fractal Volatility Skewness.
-    Измеряет асимметрию кластеров волатильности. 
-    Резкий рост skewness означает "панику" (ненормальное распределение диапазонов).
+    Adaptive Fractal Volatility Skewness.
+    Measures asymmetry of volatility clusters (panic/expansion).
     """
-    if df.empty: return df
-    
-    # Истинный диапазон (True Range)
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    # Скользящая асимметрия (Skewness)
     df['volatility_skewness'] = tr.rolling(window=lookback).apply(skew, raw=True)
     return df
 
-@provides_features('market_efficiency_index')
-def add_market_efficiency_index(df: pd.DataFrame, lookback: int = 50) -> pd.DataFrame:
+def _add_market_efficiency_index(df: pd.DataFrame, lookback: int = 50) -> pd.DataFrame:
     """
-    #18: Adaptive Market Efficiency Index.
-    Композитный индекс: чем он выше, тем сильнее рынок похож на случайное блуждание (Random Walk).
-    Считается как отношение дисперсии за N баров к сумме дисперсий за 1 бар (Variance Ratio).
+    Adaptive Market Efficiency Index.
+    Ratio of N-bar variance to sum of 1-bar variances.
     """
-    if df.empty: return df
+    if 'log_return' not in df.columns:
+        returns = np.log(df['close'] / df['close'].shift(1)).fillna(0)
+    else:
+        returns = df['log_return']
     
-    returns = np.log(df['close'] / df['close'].shift(1))
-    
-    # Дисперсия за N баров
-    var_n = returns.rolling(window=lookback).sum().var() # Аппроксимация
-    
-    # Сумма N дисперсий за 1 бар
+    var_n = returns.rolling(window=lookback).sum().var() 
     var_1 = returns.rolling(window=lookback).var() * lookback
     
-    # Variance Ratio (VR) - центрируем вокруг 1
     vr = var_n / (var_1 + 1e-9)
     df['market_efficiency_index'] = np.abs(vr - 1.0)
+    
     return df
 
-@provides_features('regime_trend_prob', 'regime_chop_prob', 'regime_break_prob')
-def add_bayesian_regime_probabilities(df: pd.DataFrame, lookback: int = 500) -> pd.DataFrame:
+def _add_bayesian_regime_probabilities(df: pd.DataFrame, lookback: int = 500) -> pd.DataFrame:
     """
-    #12: Bayesian Regime Probability Surface.
-    Использует Gaussian Mixture Model (GMM) для кластеризации волатильности и импульса 
-    в 3 скрытых режима рынка: Тренд (Trend), Флэт (Chop), и Прорыв (Breakout).
+    Bayesian Regime Probability Surface using Gaussian Mixture Models.
+    Identifies probability of Chop, Trend, or Breakout regimes.
     """
-    if df.empty or len(df) < lookback: 
-        df['regime_trend_prob'] = 0.0
-        df['regime_chop_prob'] = 0.0
-        df['regime_break_prob'] = 0.0
-        return df
-
-    # Фичи для GMM: Лог-доходность и ATR в %
-    ret = np.log(df['close'] / df['close'].shift(1)).fillna(0)
-    tr = (df['high'] - df['low']) / df['close'] * 100
-    features = np.column_stack([ret.values, tr.values])
+    # Features for GMM
+    ret = df['log_return'].values if 'log_return' in df.columns else np.log(df['close'] / df['close'].shift(1)).fillna(0).values
+    tr = ((df['high'] - df['low']) / df['close'] * 100).values
+    
+    features = np.column_stack([ret, tr])
     
     prob_trend, prob_chop, prob_break = np.zeros(len(df)), np.zeros(len(df)), np.zeros(len(df))
     
-    # Оптимизация: пересчитываем GMM не каждую свечу, а раз в день (каждые 96 свечей для 15m),
-    # чтобы код не работал вечность.
+    # Step size for re-fitting GMM (1 day = 96 bars for 15m)
     step = 96 
     
     for i in range(lookback, len(df), step):
         window_data = features[i-lookback:i]
+        end_idx = min(i+step, len(df))
         
-        # Обучаем GMM на 3 компоненты
         try:
             gmm = GaussianMixture(n_components=3, covariance_type='diag', random_state=42)
             gmm.fit(window_data)
             
-            # Предсказываем вероятности для следующего блока (step)
-            end_idx = min(i+step, len(df))
             test_data = features[i:end_idx]
             probs = gmm.predict_proba(test_data)
             
-            # Сортируем режимы по волатильности (центрам кластеров по 2-й оси - TR)
-            # 0 - Chop (Низкая вол-ть), 1 - Trend (Средняя), 2 - Breakout (Высокая)
+            # Sort modes by volatility (TR is column 1)
             vol_centers = gmm.means_[:, 1]
             sorted_indices = np.argsort(vol_centers)
             
@@ -179,8 +160,8 @@ def add_bayesian_regime_probabilities(df: pd.DataFrame, lookback: int = 500) -> 
             prob_chop[i:end_idx] = probs[:, chop_idx]
             prob_trend[i:end_idx] = probs[:, trend_idx]
             prob_break[i:end_idx] = probs[:, break_idx]
-        except:
-            # Fallback если GMM не сошелся
+        except Exception:
+            # Fallback for non-convergence
             prob_chop[i:end_idx] = 0.33
             prob_trend[i:end_idx] = 0.33
             prob_break[i:end_idx] = 0.33
@@ -189,7 +170,7 @@ def add_bayesian_regime_probabilities(df: pd.DataFrame, lookback: int = 500) -> 
     df['regime_trend_prob'] = prob_trend
     df['regime_break_prob'] = prob_break
     
-    # Заменяем нули в начале на NaN
+    # Mask initial lookback period
     cols = ['regime_chop_prob', 'regime_trend_prob', 'regime_break_prob']
     df.loc[df.index[:lookback], cols] = np.nan
     

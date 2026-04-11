@@ -1,112 +1,138 @@
 import logging
-from ctrader_open_api import Client, EndPoints, TcpProtocol
+import pandas as pd
+import datetime
+from twisted.internet import reactor
 
-# Явный импорт модулей Protobuf для избежания ошибок "is not defined"
-from ctrader_open_api.messages import OpenApiCommonMessages_pb2 as common_msg
+# Protobuf Messages
 from ctrader_open_api.messages import OpenApiMessages_pb2 as msg
 from ctrader_open_api.messages import OpenApiModelMessages_pb2 as model_msg
 
-class CTraderBroker:
-    def __init__(self, client_id: str, client_secret: str, account_id: str, access_token: str, is_demo: bool = True):
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.account_id = int(account_id)
-        self.access_token = access_token
+class CTraderStream:
+    def __init__(self, broker, symbol_name="GBPUSD", timeframe=model_msg.PROTO_OA_TRENDBAR_PERIOD_M15):
+        """
+        Управляет потоком данных (Trendbars) в реальном времени.
+        :param broker: Экземпляр CTraderBroker (уже подключенный и авторизованный)
+        """
+        self.broker = broker
+        self.symbol_name = symbol_name
+        self.symbol_id = None
+        self.timeframe = timeframe
         
-        host = EndPoints.PROTOBUF_DEMO_HOST if is_demo else EndPoints.PROTOBUF_LIVE_HOST
-        self.client = Client(host, EndPoints.PROTOBUF_PORT, TcpProtocol)
+        # In-memory хранилище свечей
+        self.dataframe = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
+        self.dataframe.index.name = 'timestamp'
         
-        self.equity = 0.0
-        self.symbols_map = {}  
-        self.on_ready_callback = None
-        
-        self.client.setConnectedCallback(self._on_connected)
-        self.client.setDisconnectedCallback(self._on_disconnected)
-        
-        logging.info(f"🔌 Инициализация cTrader TCP Протокола ({'DEMO' if is_demo else 'LIVE'})")
+        # Флаг готовности данных
+        self.is_ready = False
 
-    def start_connection(self, on_ready_callback):
-        self.on_ready_callback = on_ready_callback
-        self.client.startService()
-
-    def _on_connected(self, client):
-        logging.info("✅ TCP Подключен. Авторизация приложения...")
-        req = msg.ProtoOAApplicationAuthReq()
-        req.clientId = self.client_id
-        req.clientSecret = self.client_secret
-        df = self.client.send(req)
-        df.addCallbacks(self._on_app_auth, self._on_error)
-
-    def _on_app_auth(self, res):
-        logging.info("✅ Приложение авторизовано. Авторизация аккаунта...")
-        req = msg.ProtoOAAccountAuthReq()
-        req.ctidTraderAccountId = self.account_id
-        req.accessToken = self.access_token
-        df = self.client.send(req)
-        df.addCallbacks(self._on_account_auth, self._on_error)
-
-    def _on_account_auth(self, res):
-        logging.info("✅ Аккаунт авторизован. Загрузка списка символов...")
-        self._fetch_symbols()
-
-    def _fetch_symbols(self):
-        req = msg.ProtoOASymbolsListReq()
-        req.ctidTraderAccountId = self.account_id
-        df = self.client.send(req)
-        
-        def on_symbols(res):
-            for sym in res.symbol:
-                self.symbols_map[sym.symbolName] = sym.symbolId
-            logging.info(f"✅ База символов загружена. Готов к торговле.")
-            self.update_market_state()
-            if self.on_ready_callback:
-                self.on_ready_callback()
-                
-        df.addCallbacks(on_symbols, self._on_error)
-
-    def update_market_state(self):
-        req = msg.ProtoOATraderReq()
-        req.ctidTraderAccountId = self.account_id
-        df = self.client.send(req)
-        
-        def on_trader(res):
-            self.equity = res.trader.equity / 100.0  
-            logging.info(f"💰 Эквити: ${self.equity}")
-            
-        df.addCallbacks(on_trader, self._on_error)
-
-    def execute_command(self, decision: dict, symbol_name="GBPUSD"):
-        symbol_id = self.symbols_map.get(symbol_name)
-        if not symbol_id:
-            logging.error(f"❌ Символ {symbol_name} не найден у брокера.")
+    def start_stream(self, on_data_ready_callback):
+        """Запускает процесс подписки и загрузки истории"""
+        self.symbol_id = self.broker.symbols_map.get(self.symbol_name)
+        if not self.symbol_id:
+            logging.error(f"❌ Стример не нашел Symbol ID для {self.symbol_name}")
             return
 
-        # Используем константы из model_msg
-        side = model_msg.PROTO_OA_TRADE_SIDE_BUY if decision['action'] == "LONG" else model_msg.PROTO_OA_TRADE_SIDE_SELL
-        
-        volume_units = int(decision.get('size_lots', 0.01) * 100000)
+        self.on_data_ready = on_data_ready_callback
+        logging.info(f"📡 Запуск потока данных для {self.symbol_name} (ID: {self.symbol_id})")
 
-        req = msg.ProtoOANewOrderReq()
-        req.ctidTraderAccountId = self.account_id
-        req.symbolId = symbol_id
-        req.orderType = model_msg.PROTO_OA_ORDER_TYPE_MARKET
-        req.tradeSide = side
-        req.volume = volume_units
-        
-        sl = decision.get('sl_price')
-        tp = decision.get('tp_price')
-        if sl: req.stopLoss = float(sl)
-        if tp: req.takeProfit = float(tp)
+        # 1. Сначала скачиваем историю для 'прогрева' пайплайна (500 свечей)
+        self._fetch_historical_data()
 
-        df = self.client.send(req)
+    def _fetch_historical_data(self):
+        """Запрашивает последние 500 свечей M15"""
+        req = msg.ProtoOAGetTrendbarsReq()
+        req.ctidTraderAccountId = self.broker.account_id
+        req.period = self.timeframe
+        req.symbolId = self.symbol_id
         
-        def on_order(res):
-            logging.info(f"🔥 ОРДЕР ИСПОЛНЕН: {decision['action']} | Объем: {volume_units} ед.")
+        # Время в cTrader API передается в миллисекундах
+        now = datetime.datetime.utcnow()
+        from_time = now - datetime.timedelta(days=7) # Берем с запасом
+        
+        req.fromTimestamp = int(from_time.timestamp() * 1000)
+        req.toTimestamp = int(now.timestamp() * 1000)
+
+        df = self.broker.client.send(req)
+        
+        def on_history(res):
+            logging.info(f"✅ Получена история: {len(res.trendbar)} свечей.")
+            self._process_history(res.trendbar)
             
-        df.addCallbacks(on_order, self._on_error)
+            # 2. После получения истории подписываемся на LIVE обновления
+            self._subscribe_live_trendbars()
 
-    def _on_disconnected(self, client, reason):
-        logging.warning(f"❌ TCP Соединение разорвано: {reason}")
+        df.addCallbacks(on_history, self._on_error)
+
+    def _process_history(self, trendbars):
+        """Конвертирует Protobuf трендбары в Pandas DataFrame"""
+        records = []
+        for bar in trendbars:
+            # cTrader отдает цены в 1/100000 (зависит от символа, обычно делим на 100000)
+            # Базовая цена (low)
+            low = bar.low / 100000.0
+            
+            records.append({
+                'timestamp': pd.to_datetime(bar.utcTimestampInMinutes * 60, unit='s', utc=True),
+                'open': low + (bar.deltaOpen / 100000.0),
+                'high': low + (bar.deltaHigh / 100000.0),
+                'low': low,
+                'close': low + (bar.deltaClose / 100000.0),
+                'volume': bar.volume
+            })
+            
+        df = pd.DataFrame(records)
+        df.set_index('timestamp', inplace=True)
+        # Берем последние 500
+        self.dataframe = df.iloc[-500:]
+        
+    def _subscribe_live_trendbars(self):
+        """Подписка на живые события"""
+        req = msg.ProtoOASubscribeLiveTrendbarReq()
+        req.ctidTraderAccountId = self.broker.account_id
+        req.period = self.timeframe
+        req.symbolId = self.symbol_id
+
+        df = self.broker.client.send(req)
+        
+        def on_subscribed(res):
+            logging.info(f"✅ Подписка на LIVE Trendbars оформлена.")
+            self.is_ready = True
+            
+            # Подключаем глобальный обработчик событий (SpotEvent) к клиенту
+            self.broker.client.setSubscriber(msg.ProtoOASpotEvent().PayloadType, self._on_spot_event)
+            
+            # Сообщаем торговому боту, что данные готовы к анализу
+            if self.on_data_ready:
+                self.on_data_ready()
+
+        df.addCallbacks(on_subscribed, self._on_error)
+
+    def _on_spot_event(self, spot_event):
+        """Обработчик входящих LIVE тиков/свечей"""
+        if spot_event.symbolId != self.symbol_id: return
+        
+        # Если пришла новая/обновленная свеча
+        for bar in spot_event.trendbar:
+            if bar.period == self.timeframe:
+                ts = pd.to_datetime(bar.utcTimestampInMinutes * 60, unit='s', utc=True)
+                low = bar.low / 100000.0
+                
+                # Обновляем или добавляем свечу в DataFrame
+                self.dataframe.loc[ts] = [
+                    low + (bar.deltaOpen / 100000.0),
+                    low + (bar.deltaHigh / 100000.0),
+                    low,
+                    low + (bar.deltaClose / 100000.0),
+                    bar.volume
+                ]
+                
+                # Держим размер в пределах 500 свечей, чтобы не переполнять память
+                if len(self.dataframe) > 500:
+                    self.dataframe = self.dataframe.iloc[-500:]
+
+    def get_dataframe(self):
+        """Возвращает актуальный слепок рынка для пайплайна"""
+        return self.dataframe.copy()
 
     def _on_error(self, failure):
-        logging.error(f"❌ Ошибка cTrader API: {failure}")
+        logging.error(f"❌ Ошибка стримера данных: {failure}")

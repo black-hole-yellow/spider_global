@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
-from features.decorators import provides_features
 
-@provides_features('pdh', 'pdl', 'dist_to_pdh', 'dist_to_pdl', 'pdh_sweep', 'pdl_sweep')
 def add_daily_liquidity(df: pd.DataFrame) -> pd.DataFrame:
     """
     Рассчитывает пулы ликвидности старшего таймфрейма (Previous Daily High / Low)
@@ -35,7 +33,6 @@ def add_daily_liquidity(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-@provides_features('tap_4h_bull_fvg', 'tap_4h_bear_fvg', 'recent_tap_4h_bull_fvg', 'recent_tap_4h_bear_fvg')
 def add_htf_fvg(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100: return df
 
@@ -96,7 +93,6 @@ def add_htf_fvg(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-@provides_features('mtfa_score', 'trend_1d', 'trend_4h', 'trend_1h', 'linreg_score')
 def add_mtfa_trend(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100: return df
 
@@ -204,7 +200,6 @@ def add_mtfa_trend(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-@provides_features('pwh', 'pwl', 'dist_to_pwh', 'dist_to_pwl', 'is_eqh', 'is_eql')
 def add_advanced_liquidity_and_eq(df: pd.DataFrame) -> pd.DataFrame:
     """
     Рассчитывает недельные пулы ликвидности (Previous Weekly High/Low) 
@@ -257,7 +252,6 @@ def add_advanced_liquidity_and_eq(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-@provides_features('transfer_entropy_proxy')
 def add_transfer_entropy(df: pd.DataFrame, htf_window: int = 4, lookback: int = 50) -> pd.DataFrame:
     """
     #6: Cross-Regime Information Flow (Transfer Entropy Proxy).
@@ -286,7 +280,6 @@ def add_transfer_entropy(df: pd.DataFrame, htf_window: int = 4, lookback: int = 
     df['transfer_entropy_proxy'] = rolling_cov / (rolling_std_ltf * rolling_std_htf + 1e-9)
     return df
 
-@provides_features('vol_term_structure')
 def add_volatility_term_structure(df: pd.DataFrame, ltf_period: int = 14, htf_period: int = 56) -> pd.DataFrame:
     """
     #21: Volatility Term Structure Curvature Change.
@@ -307,7 +300,6 @@ def add_volatility_term_structure(df: pd.DataFrame, ltf_period: int = 14, htf_pe
     df['vol_term_structure'] = ltf_atr / (htf_atr + 1e-9)
     return df
 
-@provides_features('ob_migration_velocity')
 def add_ob_migration_velocity(df: pd.DataFrame, window: int = 96) -> pd.DataFrame:
     """
     #20: Order Block Migration Velocity.
@@ -333,4 +325,22 @@ def add_ob_migration_velocity(df: pd.DataFrame, window: int = 96) -> pd.DataFram
     # Если оба растут (например, бычий канал), берем среднюю скорость канала
     df['ob_migration_velocity'] = (max_migration + min_migration) / 2.0
     
+    return df
+
+# ==========================================
+# MASTER WRAPPER (Оркестратор модуля)
+# ==========================================
+def add_htf_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Master entry point for Higher Time Frame (HTF) features.
+    Guarantees execution order for institutional levels, multi-timeframe alignment,
+    and term structure metrics.
+    """
+    df = add_daily_liquidity(df)
+    df = add_advanced_liquidity_and_eq(df)
+    df = add_htf_fvg(df)
+    df = add_mtfa_trend(df)
+    df = add_transfer_entropy(df)
+    df = add_volatility_term_structure(df)
+    df = add_ob_migration_velocity(df)
     return df

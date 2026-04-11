@@ -1,13 +1,7 @@
 import pandas as pd
 import numpy as np
-from features.decorators import provides_features
 
-@provides_features(
-    'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
-    'asia_intensity', 'london_intensity', 'ny_intensity',
-    'session_overlap_score', 'active_session_name'
-)
-def add_vector_sessions(df: pd.DataFrame) -> pd.DataFrame:
+def _add_vector_sessions(df: pd.DataFrame) -> pd.DataFrame:
     """
     Генерирует непрерывные векторные представления (Embeddings) торговых сессий.
     Вместо жестких 1/0 используется плавная интенсивность ликвидности.
@@ -26,9 +20,6 @@ def add_vector_sessions(df: pd.DataFrame) -> pd.DataFrame:
 
     # 2. SESSION INTENSITY EMBEDDINGS (Плавная ликвидность)
     # Используем формулу Гаусса: exp(-0.5 * ((x - mu) / sigma)^2)
-    # mu - пик ликвидности (часто совпадает с открытием + 1-2 часа)
-    # sigma - ширина сессии (насколько плавно размазывается активность)
-
     def gaussian_intensity(x, mu, sigma):
         # Обработка перехода через полночь для Азии (цикличность 24h)
         dist = np.minimum(abs(x - mu), 24 - abs(x - mu))
@@ -45,9 +36,9 @@ def add_vector_sessions(df: pd.DataFrame) -> pd.DataFrame:
 
     # 3. OVERLAP SCORE (Метрика "Безумия")
     # Пересечение Лондона и Нью-Йорка дает самую высокую плотность ордеров в мире.
-    # Эта фича напрямую скажет ИИ: "Сейчас на рынке будут жесткие сквизы".
     df['session_overlap_score'] = df['london_intensity'] * df['ny_intensity']
 
+    # 4. CATEGORICAL SESSION STATE (Для CatBoost Meta-Labeler)
     conditions = [
         (df['london_intensity'] > 0.3) & (df['ny_intensity'] > 0.3),
         (df['ny_intensity'] > 0.3),
@@ -59,32 +50,36 @@ def add_vector_sessions(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-@provides_features('session_liquidity_transfer')
-def add_session_liquidity_transfer(df: pd.DataFrame, window: int = 8) -> pd.DataFrame:
+def _add_session_liquidity_transfer(df: pd.DataFrame, window: int = 8) -> pd.DataFrame:
     """
     #9: Session Liquidity Transfer Strength.
     Сравнивает объем текущих торгов с фоновым объемом "тихой" сессии.
-    Например, всплеск объема на открытии Лондона (08:00 GMT) относительно ночной Азии.
     Высокий трансфер означает сильный направленный институциональный импульс на открытии.
     """
     if df.empty or 'volume' not in df.columns: return df
     
     # 1. Считаем скользящее среднее объема за последние 8 свечей (2 часа)
-    # Это наш "базовый" фон ликвидности до текущего момента
     background_volume = df['volume'].shift(1).rolling(window=window).mean()
     
     # 2. Вычисляем аномальность текущего объема
-    # Сколько раз текущая 15m свеча превышает средний объем последних 2 часов?
     volume_surge = df['volume'] / (background_volume + 1e-9)
     
     # 3. Придаем силу направлению (Directional Transfer)
-    # Если свеча бычья, трансфер положительный, если медвежья - отрицательный.
-    # range_hl страхует от деления на ноль
     range_hl = (df['high'] - df['low']).replace(0, 1e-5)
     bar_direction = (df['close'] - df['open']) / range_hl
     
     df['session_liquidity_transfer'] = volume_surge * bar_direction
     
-    # Чтобы фича работала лучше в ML, сглаживаем её (EMA) или берем логарифм, 
-    # но в данном виде (сигнал-спайк) она отлично подходит для Трансформера.
+    return df
+
+# ==========================================
+# 🚀 MASTER WRAPPER (Entry Point)
+# ==========================================
+def add_session_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Единая точка входа для слоя Session & Temporal Features.
+    Рассчитывается в слое 4 (после Technical, Structural, HTF).
+    """
+    df = _add_vector_sessions(df)
+    df = _add_session_liquidity_transfer(df)
     return df
