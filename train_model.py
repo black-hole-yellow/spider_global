@@ -121,21 +121,4 @@ class MetaLabelingTrainer:
         logging.info("Training CatBoost Meta-Labeler...")
         self.model.fit(train_pool, eval_set=val_pool)
         self.model.save_model(save_path)
-        logging.info(f"Model saved to {save_path}")
-
-if __name__ == "__main__":
-    ml_features = [
-        'active_setup', 'volatility_z', 'changepoint_prob', 'trend_strength', 
-        'cusum_signal', 'asia_intensity', 'london_intensity', 'ny_intensity', 
-        'session_overlap_score', 'dist_to_pwh', 'dist_to_pwl', 'mtfa_score', 
-        "llm_sentiment_score", "is_macro_alignment", "active_session_name"
-    ]
-    try:
-        df = pd.read_csv("data/processed/strategy_labeled_data.csv")
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df.set_index('timestamp', inplace=True)
-        
-        trainer = MetaLabelingTrainer() 
-        trainer.train(df, ml_features)
-    except Exception as e:
-        logging.error(f"Failed to run training: {e}")
+        logging.info(f"Model saved to {save_path}"
